@@ -1,0 +1,87 @@
+{
+  "datasets": [
+    {
+      "name": "HIV",
+      "path": "data/raw/HIV.csv",
+      "smiles_column": "smiles",
+      "target_column": "HIV_active",
+      "invalid_smiles": "skip"
+    }
+  ],
+  "seeds": [
+    42
+  ],
+  "test_size": 0.2,
+  "cv_folds": 5,
+  "refit_metric": "balanced_accuracy",
+  "search_jobs": -1,
+  "output_dir": "results",
+  "cache_dir": ".cache/features",
+  "matrix": {
+    "feature": [
+      "morgan"
+    ],
+    "split": [
+      "random",
+      "scaffold"
+    ],
+    "model": [
+      "random_forest",
+      "catboost"
+    ],
+    "strategy": [
+      "default",
+      "mtune"
+    ],
+    "optimization": [
+      "grid"
+    ]
+  },
+  "mtune": {
+    "method": "ensemble"
+  },
+  "morgan": {
+    "radius": 2,
+    "n_bits": 2048,
+    "chirality": true
+  },
+  "grids": {
+    "random_forest": {
+      "n_estimators": [
+        100,
+        300
+      ],
+      "max_depth": [
+        null,
+        10
+      ],
+      "min_samples_leaf": [
+        1,
+        3
+      ]
+    },
+    "catboost": {
+      "iterations": [
+        300,
+        600
+      ],
+      "depth": [
+        4,
+        6
+      ],
+      "learning_rate": [
+        0.03,
+        0.1
+      ]
+    }
+  },
+  "mtune_grid": {
+    "n_ensemble": [
+      3,
+      5,
+      7,
+      9,
+      11
+    ]
+  }
+}
