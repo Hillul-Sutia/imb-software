@@ -6,7 +6,15 @@ build-backend = "setuptools.build_meta"
 name = "molecular-imbalance"
 version = "0.1.0"
 requires-python = ">=3.11,<3.13"
-dependencies = ["numpy>=1.26,<3", "pandas>=2.1,<3", "scikit-learn>=1.4,<1.8", "rdkit>=2023.9", "joblib>=1.3", "mtune==0.0.8"]
+dependencies = [
+    "numpy>=1.26,<3",
+    "pandas>=2.1,<3",
+    "scikit-learn>=1.4,<1.8",
+    "rdkit>=2023.9",
+    "joblib>=1.3",
+    "mtune==0.0.8",
+    "catboost>=1.2.10",
+]
 
 [project.optional-dependencies]
 catboost = ["catboost>=1.2,<2"]
