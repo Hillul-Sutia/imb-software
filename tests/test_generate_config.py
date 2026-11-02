@@ -60,10 +60,20 @@ def test_missing_or_ambiguous_inputs(tmp_path):
     with pytest.raises(ValueError,match='not found'):g.generate(tmp_path,tmp_path/'out.json',targets={'absent.csv':'a'})
 
 
-def test_duplicate_sources_rejected(tmp_path):
+def test_subdirectories_ignored(tmp_path):
     csv(tmp_path/'BBBP.csv',{'smiles':['CC'],'p_np':[0]})
     csv(tmp_path/'copy'/'BBBP.csv',{'smiles':['CC'],'p_np':[0]})
-    with pytest.raises(ValueError,match='Duplicate dataset'):g.generate(tmp_path,tmp_path/'out.json')
+    csv(tmp_path/'nested'/'other.csv.gz',{'smiles':['CO'],'label':[1]})
+    csv(tmp_path/'top.csv.gz',{'structure':['CN'],'label':[0]})
+    cfg,_,_=g.generate(tmp_path,tmp_path/'out.json')
+    assert {d['name'] for d in cfg['datasets']}=={'BBBP','top'}
+    assert all('/copy/' not in d['path'] and '/nested/' not in d['path'] for d in cfg['datasets'])
+
+
+def test_only_nested_files_not_discovered(tmp_path):
+    csv(tmp_path/'nested'/'dataset.csv',{'smiles':['CC'],'label':[0]})
+    with pytest.raises(ValueError,match='No usable CSV files'):
+        g.generate(tmp_path,tmp_path/'out.json')
 
 
 def test_generation_preserves_inputs(tmp_path):

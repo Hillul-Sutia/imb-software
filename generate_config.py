@@ -42,7 +42,7 @@ def discover(raw_dir, config_dir, targets=None):
         raise ValueError(f'Dataset directory does not exist: {raw_dir}')
     targets = targets or {}
     datasets, notices, used, names = [], [], set(), set()
-    files = sorted((p for p in raw_dir.rglob('*') if p.is_file() and
+    files = sorted((p for p in raw_dir.iterdir() if p.is_file() and
                     p.name.lower().endswith(('.csv', '.csv.gz'))), key=lambda p: str(p).lower())
     for path in files:
         relative = path.relative_to(raw_dir).as_posix()
@@ -133,7 +133,7 @@ def generate(raw_dir='data/raw', output='config.grid.json', targets=None,
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('--data-dir', default='data/raw', help='Directory to scan recursively')
+    parser.add_argument('--data-dir', default='data/raw', help='Directory to scan (direct files only; subdirectories ignored)')
     parser.add_argument('--output', default='config.grid.json')
     parser.add_argument('--target', action='append', default=[], metavar='RELATIVE_FILE=COLUMN',
                         help='Explicit target for a file relative to data-dir; may repeat for different files')

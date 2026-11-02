@@ -92,7 +92,7 @@ Scoring update validation (2026-10-27): 18 tests passed, including all three ref
 .\.venv312\Scripts\python.exe -m generate_config --mtune-method ensemble --refit-metric balanced_accuracy --output config.discovered.json
 ```
 
-The generator recursively scans `data/raw` for `.csv` and `.csv.gz` files, without dataset-name lookups. Dataset names come from file stems. It inspects every row in chunks with RDKit: a column qualifies if at least 50% of all its entries parse as nonempty molecular SMILES. Missing, numeric and invalid entries count against the total. The unique highest-scoring column is selected. Ties or no qualifying column leave `smiles_column` empty with a notice; all discovered CSVs still appear in the draft. RDKit parseability is a heuristic, so review the detected column (molecular-looking identifiers may also parse). The 50% rule is for discovery only: training still validates every SMILES and does not silently drop bad rows.
+The generator scans only files directly inside `data/raw` for `.csv` and `.csv.gz` files, without dataset-name lookups. Dataset names come from file stems. It inspects every row in chunks with RDKit: a column qualifies if at least 50% of all its entries parse as nonempty molecular SMILES. Missing, numeric and invalid entries count against the total. The unique highest-scoring column is selected. Ties or no qualifying column leave `smiles_column` empty with a notice; all discovered CSVs still appear in the draft. RDKit parseability is a heuristic, so review the detected column (molecular-looking identifiers may also parse). The 50% rule is for discovery only: training still validates every SMILES and does not silently drop bad rows.
 
 Every `target_column` is empty by default, including standard MoleculeNet files. Open the generated config and fill in the binary label column for each dataset. Neither dataset names nor binary-valued column patterns decide your scientific endpoint. For example:
 
@@ -102,7 +102,7 @@ Every `target_column` is empty by default, including standard MoleculeNet files.
 
 If needed, also fill in a blank `smiles_column`. The runner rejects unfilled fields before preview/training. Labels must contain both numeric 0 and 1; multi-target datasets need an explicit endpoint. To supply a target intentionally during generation, the optional `--target "relative_file.csv=COLUMN"` remains supported. Repeat for different files.
 
-The generator does not modify or download datasets and never overwrites a config. Existing completed configurations are unchanged. Paths are relative to the generated config. `--data-dir PATH` changes the scanned directory; `--output FILE` selects a new filename. Duplicate file stems are rejected rather than silently combining datasets.
+The generator does not modify or download datasets and never overwrites a config. Existing completed configurations are unchanged. Paths are relative to the generated config. `--data-dir PATH` changes the scanned directory (subfolders are always ignored); `--output FILE` selects a new filename. Duplicate file stems are rejected rather than silently combining datasets.
 
 By default, the generator writes `config.grid.json` with 4 Morgan combinations per discovered file, random splitting only, grid-only optimization, ensemble M-Tune, balanced-accuracy refit, and one seed. Use `--optimization default` or `--optimization both` for other modes, `--mtune-method direct` for direct M-Tune, and `--refit-metric average_precision` or `f2` for other objectives. Grid-only ensemble configs omit the redundant fixed `n_ensemble`; the candidate sizes remain in `mtune_grid`. Optimization applies to either preset: `--preset smoke` now selects one Morgan/random/RandomForest/default-threshold combination per file with grid search; add `--optimization default` for a quick fixed-parameter smoke run. `--chemberta-revision SHA` includes ChemBERTa with a pinned 40-character model commit; its optional dependencies must also be installed.
 
@@ -237,3 +237,6 @@ Validation: 48 tests passed, covering Morgan and synthetic ChemBERTa embedding C
 
 
 Generator split default: new configs now contain `"split": ["random"]` only. Scaffold splitting remains supported; explicitly edit the generated matrix to `["scaffold"]` or `["random", "scaffold"]` when desired. Existing config files and the runner fallback axes are unchanged. Default matrix size is four experiments per dataset and seed (Morgan, random split, two classifiers, two threshold strategies, grid search).
+
+
+Dataset discovery is nonrecursive: only `.csv` and `.csv.gz` files directly inside `data/raw` (or the selected `--data-dir`) are considered. Files in subdirectories are ignored. Existing configs are not modified; generate a new config to apply discovery changes. The training runner still loads exactly the paths explicitly listed in its config.
