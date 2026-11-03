@@ -19,7 +19,8 @@
   "cache_dir": ".cache/features",
   "matrix": {
     "feature": [
-      "morgan"
+      "morgan",
+      "chemberta"
     ],
     "split": [
       "random",
@@ -83,5 +84,11 @@
       9,
       11
     ]
+  },
+  "chemberta": {
+    "model": "DeepChem/ChemBERTa-77M-MLM",
+    "revision": "ed8a5374f2024ec8da53760af91a33fb8f6a15ff",
+    "batch_size": 32,
+    "max_length": 256
   }
 }

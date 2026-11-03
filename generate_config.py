@@ -8,6 +8,9 @@ import re
 import pandas as pd
 from rdkit import Chem, rdBase
 
+# Immutable revision verified against the Hugging Face model API on 2026-11-03.
+DEFAULT_CHEMBERTA_REVISION = "ed8a5374f2024ec8da53760af91a33fb8f6a15ff"
+
 def detect_smiles(path):
     """Scan every row in chunks; a candidate must have valid SMILES in >=50% of rows.
 
@@ -96,7 +99,7 @@ def generate(raw_dir='data/raw', output='config.grid.json', targets=None,
     cfg = {'datasets': datasets, 'seeds': [42], 'test_size': .2, 'cv_folds': 5,
            'refit_metric': refit_metric, 'search_jobs': -1,
            'output_dir': 'results', 'cache_dir': '.cache/features',
-           'matrix': {'feature': ['morgan'], 'split': ['random'],
+           'matrix': {'feature': ['morgan', 'chemberta'], 'split': ['random'],
                       'model': ['random_forest', 'catboost'], 'strategy': ['default', 'mtune'],
                       'optimization': ['default', 'grid']},
            'mtune': {'method': mtune_method},
@@ -114,12 +117,10 @@ def generate(raw_dir='data/raw', output='config.grid.json', targets=None,
         cfg['matrix']['optimization'] = ['default', 'grid'] if optimization == 'both' else [optimization]
     if cfg['matrix']['optimization'] == ['grid']:
         cfg['mtune'].pop('n_ensemble', None)
-    if chemberta_revision is not None:
-        cfg['matrix']['feature'].append('chemberta')
-        cfg['chemberta'] = {'model': 'DeepChem/ChemBERTa-77M-MLM', 'revision': chemberta_revision,
-                           'batch_size': 32, 'max_length': 256}
-    else:
-        notices.append('Morgan features selected. To include ChemBERTa, supply --chemberta-revision SHA and install Torch/Transformers.')
+    cfg['chemberta'] = {'model': 'DeepChem/ChemBERTa-77M-MLM',
+                       'revision': chemberta_revision if chemberta_revision is not None else DEFAULT_CHEMBERTA_REVISION,
+                       'batch_size': 32, 'max_length': 256}
+    notices.append('Both Morgan and ChemBERTa selected. ChemBERTa requires Torch/Transformers and model weights on first use.')
     # Exclusive creation prevents overwriting a user's config even if another writer races us.
     output.parent.mkdir(parents=True, exist_ok=True)
     with output.open('x', encoding='utf-8') as f:
@@ -141,7 +142,7 @@ def main():
     parser.add_argument('--optimization', choices=['default', 'grid', 'both'], default='grid',
                         help='Optimization modes (default: grid; applies to either preset)')
     parser.add_argument('--mtune-method', choices=['direct', 'ensemble'], default='ensemble')
-    parser.add_argument('--chemberta-revision', help='Enable ChemBERTa with a pinned model commit SHA')
+    parser.add_argument('--chemberta-revision', help='Override the bundled pinned ChemBERTa model commit SHA')
     parser.add_argument('--refit-metric', choices=['average_precision', 'balanced_accuracy', 'f2'],
                         default='balanced_accuracy')
     args = parser.parse_args()
