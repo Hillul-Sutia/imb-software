@@ -54,20 +54,88 @@ def cv_winner_metrics(dest, objective):
     return {c[len('mean_test_'):]: float(row[c]) for c in scores.columns if c.startswith('mean_test_')}
 
 
-def write_metric_table(dest, train, test, cv, n_train, n_test):
+def readable_metrics(values, positive=None):
+    """Suffixes mean original input labels; legacy bare metrics mean minority-positive."""
+    values = {k:v for k,v in dict(values).items() if not (k.endswith(('_0','_1')) and pd.isna(v))}
+    per_class = ('recall','specificity','precision','f1','f2','average_precision','roc_auc')
+    for name in per_class + ('tp','fp','fn','tn'):
+        if name not in values and 'minority_'+name in values:
+            values[name] = values['minority_'+name]
+    if positive in (0,1):
+        other = 1-positive
+        for name in per_class:
+            if name in values:
+                values.setdefault(f'{name}_{positive}', values[name])
+        if 'specificity' in values:
+            values.setdefault(f'recall_{other}', values['specificity'])
+        if 'recall' in values:
+            values.setdefault(f'specificity_{other}', values['recall'])
+        if 'roc_auc' in values:
+            values.setdefault(f'roc_auc_{other}', values['roc_auc'])
+        if all(k in values and pd.notna(values[k]) for k in ('tn','fp','fn','tp')):
+            tn,fp,fn,tp = (float(values[k]) for k in ('tn','fp','fn','tp'))
+            def ratio(a,b): return a/b if b else 0.
+            for label, (t,f,n,z) in ((positive,(tp,fp,fn,tn)), (other,(tn,fn,fp,tp))):
+                for name, value in {'precision':ratio(t,t+f),'recall':ratio(t,t+n),
+                    'specificity':ratio(z,z+f), 'f1':ratio(2*t,2*t+f+n),
+                    'f2':ratio(5*t,5*t+f+4*n),'support':t+n,
+                    'tp':t,'fp':f,'fn':n,'tn':z}.items():
+                    values.setdefault(f'{name}_{label}',value)
+    for label in (0,1):
+        for name in per_class:
+            values.setdefault(f'{name}_{label}', None)
+    for name in per_class + ('tp','fp','fn','tn'):
+        if name in values:
+            values['minority_'+name] = values.pop(name)
+    return values
+
+
+def cv_winner_timing(dest, objective):
+    path = dest/'cv_results.csv'
+    if not path.exists(): return {}
+    table = pd.read_csv(path)
+    if 'mean_test_'+objective not in table: return {}
+    row = table.loc[table['mean_test_'+objective].idxmax()]
+    if 'mean_fit_time' not in row or 'mean_score_time' not in row: return {}
+    fit,score = float(row['mean_fit_time']),float(row['mean_score_time'])
+    return {'fit_seconds':fit,'score_seconds':score,'partition_elapsed_seconds':fit+score,
+            'timing_scope':'mean per inner fold for selected candidate; excludes other candidates and final refit'}
+
+
+def timing_columns(timing):
+    timing = dict(timing or {})
+    seconds = timing.get('partition_elapsed_seconds')
+    return {'fit_seconds': timing.get('fit_seconds'), 'score_seconds': timing.get('score_seconds'),
+            'partition_elapsed_seconds': seconds,
+            'partition_elapsed_minutes': seconds/60 if seconds is not None else None,
+            'timing_scope':timing.get('timing_scope','not recorded for this historical partition'),
+            'timing_status':'available' if seconds is not None else 'not_recorded'}
+
+
+def write_metric_table(dest, train, test, cv, n_train, n_test, timings=None, positive=None):
     rows = []
     for name, values, size, note in [
         ('train', train, n_train, 'Final model evaluated on its fitting data; optimistic diagnostic'),
         ('cv_validation_mean', cv, None, 'Selected candidate mean across inner validation folds; not outer test'),
         ('test', test, n_test, 'Final model evaluated on held-out outer test data')]:
         rows.append({'partition': name, 'n_samples': size,
-                     'status': 'available' if values else 'not_recorded', 'note': note, **values})
+                     'status': 'available' if values else 'not_recorded', 'note': note,
+                     **readable_metrics(values, positive), **timing_columns((timings or {}).get(name))})
     pd.DataFrame(rows).to_csv(dest / 'metrics.csv', index=False)
 
 
 def artifact_hashes(dest):
     return {p.name: hashlib.sha256(p.read_bytes()).hexdigest() for p in dest.iterdir()
             if p.is_file() and p.name not in ('result.json', 'error.json')}
+
+
+def save_summary(frame, path):
+    try:
+        frame.to_csv(path, index=False)
+    except PermissionError:
+        alternate = path.with_name(path.stem + '.updated.csv')
+        frame.to_csv(alternate, index=False)
+        print(f'{path.name} is locked or not writable; wrote {alternate.name}. Close the original file and refresh again.')
 
 
 def update_summaries(output):
@@ -81,18 +149,33 @@ def update_summaries(output):
             continue
         context = {'run_id': r['run_id'], 'folder': path.parent.name, **r['experiment'],
                    'positive_original_label': r.get('label_mapping', {}).get('positive_original_label'),
-                   'refit_metric': r.get('refit_metric')}
+                   'refit_metric': r.get('refit_metric'),
+                   'grid_search_seconds': r.get('grid_search_seconds'),
+                   'elapsed_seconds': r.get('elapsed_seconds'),
+                   'elapsed_minutes': r['elapsed_seconds']/60 if r.get('elapsed_seconds') is not None else None}
         index.append({**context, 'status': 'completed', 'n_train': r.get('n_train'), 'n_test': r.get('n_test')})
         legacy_summary.append({**context, **r.get('metrics', {})})
         table = path.parent / 'metrics.csv'
         if table.exists():
             for row in pd.read_csv(table).to_dict('records'):
-                performance.append({**context, **row})
+                durations = {} if row.get('partition') == 'test' else {'elapsed_seconds': None, 'elapsed_minutes': None, 'grid_search_seconds': None}
+                name = row.get('partition')
+                # Refresh can enrich old tables without rewriting experiment artifacts.
+                timing = r.get('partition_timings', {}).get(name)
+                if timing is None and name == 'cv_validation_mean':
+                    timing = cv_winner_timing(path.parent, r.get('refit_metric', 'balanced_accuracy'))
+                stored_times = {k: v for k,v in row.items() if k.startswith(('fit_seconds','score_seconds','partition_elapsed','timing_')) and pd.notna(v)}
+                if pd.isna(row.get('partition_elapsed_seconds')):
+                    stored_times = {}
+                converted = readable_metrics(row, context['positive_original_label'])
+                performance.append({**context, **converted, **timing_columns(timing), **stored_times, **durations})
         else:
-            performance.append({**context, 'partition': 'test', **r.get('metrics', {})})
-    pd.DataFrame(index, columns=list(index[0]) if index else ['run_id','folder','dataset','model','strategy','status']).to_csv(output / 'experiments.csv', index=False)
-    pd.DataFrame(performance, columns=list(dict.fromkeys(k for row in performance for k in row)) if performance else ['run_id','folder','dataset','model','partition','status','balanced_accuracy','recall']).to_csv(output / 'performance_summary.csv', index=False)
-    pd.DataFrame(legacy_summary, columns=list(dict.fromkeys(k for row in legacy_summary for k in row)) if legacy_summary else ['run_id','folder','dataset','model','balanced_accuracy','recall']).to_csv(output / 'summary.csv', index=False)
+            performance.append({**context, 'partition': 'test',
+                **readable_metrics(r.get('metrics', {}), context['positive_original_label']),
+                **timing_columns(r.get('partition_timings', {}).get('test'))})
+    save_summary(pd.DataFrame(index, columns=list(index[0]) if index else ['run_id','folder','dataset','model','strategy','status','elapsed_seconds','elapsed_minutes']), output / 'experiments.csv')
+    save_summary(pd.DataFrame(performance, columns=list(dict.fromkeys(k for row in performance for k in row)) if performance else ['run_id','folder','dataset','model','partition','status','balanced_accuracy','recall','elapsed_seconds','elapsed_minutes']), output / 'performance_summary.csv')
+    save_summary(pd.DataFrame(legacy_summary, columns=list(dict.fromkeys(k for row in legacy_summary for k in row)) if legacy_summary else ['run_id','folder','dataset','model','balanced_accuracy','recall','elapsed_seconds','elapsed_minutes']), output / 'summary.csv')
 
 
 def organize_existing(output, atomic_json, digest):

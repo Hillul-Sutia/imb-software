@@ -257,22 +257,35 @@ def positive_label(y_train):
 
 def minority_metrics(y, pred, prob, positive):
     """Map the fixed training minority to binary positive, including score orientation."""
-    return metrics((np.asarray(y) == positive).astype(int),
-                   (np.asarray(pred) == positive).astype(int), prob)
+    y, pred = np.asarray(y), np.asarray(pred)
+    values = metrics((y == positive).astype(int), (pred == positive).astype(int), prob)
+    for label in (0, 1):
+        binary = metrics((y == label).astype(int), (pred == label).astype(int),
+                         prob if label == positive else 1-np.asarray(prob))
+        values.update({f'{name}_{label}': binary[name] for name in CLASS_METRICS})
+        values[f'support_{label}'] = int(np.sum(y == label))
+    return values
+
+
+def evaluate_partition(model, X, y, positive):
+    started = time.perf_counter()
+    probabilities = model.predict_proba(X)
+    class1 = probabilities[:, list(model.classes_).index(1)]
+    pred = model.predict(X) if isinstance(model, MTuneAdapter) else (class1 >= .5).astype(int)
+    minority_prob = probabilities[:, list(model.classes_).index(positive)]
+    scores = minority_metrics(y, pred, minority_prob, positive)
+    return scores, pred, class1, minority_prob, time.perf_counter()-started
 
 
 def cv_metrics(model, X, y, positive):
-    # Threshold metrics use the estimator decision (including M-Tune hard voting).
-    # Ranking metrics always use continuous probabilities, never predicted labels.
-    prob = model.predict_proba(X)[:, list(model.classes_).index(positive)]
-    pred = model.predict(X) if isinstance(model, MTuneAdapter) else (
-        model.predict_proba(X)[:, list(model.classes_).index(1)] >= .5).astype(int)
-    values = minority_metrics(y, pred, prob, positive)
+    values, _, _, _, _ = evaluate_partition(model, X, y, positive)
     return {name: values[name] for name in CV_METRICS}
 
 
+CLASS_METRICS = ('recall', 'specificity', 'precision', 'f1', 'f2', 'average_precision', 'roc_auc')
 CV_METRICS = ('balanced_accuracy', 'recall', 'specificity', 'precision',
-              'f1', 'f2', 'average_precision', 'roc_auc')
+              'f1', 'f2', 'average_precision', 'roc_auc') + tuple(
+                  f'{name}_{label}' for label in (0, 1) for name in CLASS_METRICS)
 
 
 def refit_objective(cfg):
@@ -386,7 +399,7 @@ def run(config_path, plan=False, export_only=False):
     reference = reporting.shared_run(output, cfg, environment, code_hash, atomic_json, digest)
     failures = []
     for combo in combos:
-        started = time.time()
+        started = time.perf_counter()
         data, data_hash = load_data(specs[combo['dataset']], root)
         identity = dict(experiment=combo, config=cfg, data_hash=data_hash,
                         versions=environment, code_hash=code_hash)
@@ -424,21 +437,35 @@ def run(config_path, plan=False, export_only=False):
             positive = positive_label(y[tr])
             model = estimator(combo, cfg)
             best_params, best_score = {}, None
+            grid_search_seconds = None
+            partition_timings = {}
             if combo['optimization'] == 'grid':
                 cv = folds(y[tr], groups[tr], cfg.get('cv_folds', 5), combo['seed'])
                 atomic_json(dest / 'cv.json', [{'train': tr[a].tolist(), 'validation': tr[b].tolist()} for a, b in cv])
                 grid = parameter_grid(combo, cfg, y[tr], cv)
                 search = GridSearchCV(model, grid, scoring=partial(cv_metrics, positive=positive), cv=cv,
                                       n_jobs=cfg.get('search_jobs', 1), error_score='raise', refit=objective)
+                search_started = time.perf_counter()
                 search.fit(x[tr], y[tr])
+                grid_search_seconds = time.perf_counter()-search_started
+                final_fit_seconds = float(search.refit_time_)
+                winner = search.best_index_
+                cv_fit = float(search.cv_results_['mean_fit_time'][winner])
+                cv_score = float(search.cv_results_['mean_score_time'][winner])
+                partition_timings['cv_validation_mean'] = {
+                    'fit_seconds': cv_fit, 'score_seconds': cv_score,
+                    'partition_elapsed_seconds': cv_fit+cv_score,
+                    'timing_scope': 'mean per inner fold for selected candidate; excludes other candidates and final refit'}
                 model = search.best_estimator_
                 best_params, best_score = search.best_params_, float(search.best_score_)
                 pd.DataFrame(search.cv_results_).to_csv(dest / 'cv_results.csv', index=False)
             else:
+                fit_started = time.perf_counter()
                 model.fit(x[tr], y[tr])
-            prob = model.predict_proba(x[te])[:, list(model.classes_).index(1)]
-            pred = model.predict(x[te]) if combo['strategy'] == 'mtune' else (prob >= .5).astype(int)
-            minority_prob = model.predict_proba(x[te])[:, list(model.classes_).index(positive)]
+                final_fit_seconds = time.perf_counter()-fit_started
+            test_metrics, pred, prob, minority_prob, test_score_seconds = evaluate_partition(model, x[te], y[te], positive)
+            partition_timings['test'] = {'fit_seconds': 0., 'score_seconds': test_score_seconds,
+                'partition_elapsed_seconds': test_score_seconds, 'timing_scope': 'held-out prediction and metric calculation only'}
             pd.DataFrame({'row': te, 'source_data_row': data.get('source_data_row', pd.Series(np.arange(len(data))+1)).iloc[te].to_numpy(), 'smiles': data.smiles.iloc[te].to_numpy(), 'y_true': y[te],
                           'y_pred': pred, 'p_class_1': prob, 'y_true_minority_positive': (y[te] == positive).astype(int),
                           'y_pred_minority_positive': (pred == positive).astype(int), 'p_minority': minority_prob}).to_csv(dest / 'predictions.csv', index=False)
@@ -448,12 +475,13 @@ def run(config_path, plan=False, export_only=False):
                 actual = model.estimator_
                 thresholds = {'minority_class': int(actual.minority_class), 'method': actual.method,
                               'values': [float(actual.threshold)] if actual.method == 'direct' else list(map(float, actual.thresholds_))}
-            train_probabilities = model.predict_proba(x[tr])
-            train_pred = model.predict(x[tr]) if combo['strategy'] == 'mtune' else (train_probabilities[:, list(model.classes_).index(1)] >= .5).astype(int)
-            train_metrics = minority_metrics(y[tr], train_pred, train_probabilities[:, list(model.classes_).index(positive)], positive)
-            test_metrics = minority_metrics(y[te], pred, minority_prob, positive)
+            train_metrics, _, _, _, train_score_seconds = evaluate_partition(model, x[tr], y[tr], positive)
+            partition_timings['train'] = {'fit_seconds': final_fit_seconds, 'score_seconds': train_score_seconds,
+                'partition_elapsed_seconds': final_fit_seconds+train_score_seconds,
+                'timing_scope': 'final full-training fit/refit plus training prediction and metric calculation'}
             cv_metrics_selected = reporting.cv_winner_metrics(dest, objective) if combo['optimization'] == 'grid' else {}
-            reporting.write_metric_table(dest, train_metrics, test_metrics, cv_metrics_selected, len(tr), len(te))
+            reporting.write_metric_table(dest, train_metrics, test_metrics, cv_metrics_selected, len(tr), len(te),
+                                         timings=partition_timings, positive=positive)
             atomic_json(dest / 'model_details.json', {
                 'model': combo['model'], 'strategy': combo['strategy'], 'best_params': best_params,
                 'resolved_model_params': (model.base_model if isinstance(model, MTuneAdapter) else model).get_params(),
@@ -466,7 +494,8 @@ def run(config_path, plan=False, export_only=False):
                                'source': 'outer_training_counts', 'tie_policy': 'original_label_1'},
                 refit_metric=objective,
                 best_params=best_params, best_cv_score=best_score, thresholds=thresholds,
-                n_train=len(tr), n_test=len(te), elapsed_seconds=time.time()-started, artifacts=artifacts))
+                partition_timings=partition_timings, grid_search_seconds=grid_search_seconds,
+                n_train=len(tr), n_test=len(te), elapsed_seconds=time.perf_counter()-started, artifacts=artifacts))
             (dest / 'error.json').unlink(missing_ok=True)
             reporting.update_summaries(output)
             print(f'Completed: {dest.name}')
@@ -482,10 +511,20 @@ def run(config_path, plan=False, export_only=False):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('config', nargs='?')
+    parser.add_argument('--refresh-summaries', metavar='DIRECTORY', help='Refresh CSV summaries from saved results without training')
     parser.add_argument('--organize-results', metavar='DIRECTORY', help='Organize completed legacy results without retraining')
     parser.add_argument('--plan', action='store_true')
     parser.add_argument('--export-features', action='store_true', help='Export shared features and labels without splitting or training')
     args = parser.parse_args()
+    if args.refresh_summaries:
+        if args.config or args.plan or args.export_features or args.organize_results:
+            parser.error('--refresh-summaries must be used alone')
+        directory = Path(args.refresh_summaries)
+        if not directory.is_dir():
+            parser.error('results directory does not exist')
+        reporting.update_summaries(directory)
+        print(f'Refreshed summaries in {directory.resolve()}')
+        return
     if args.organize_results:
         if args.config or args.plan or args.export_features:
             parser.error('--organize-results cannot be combined with config or --plan')

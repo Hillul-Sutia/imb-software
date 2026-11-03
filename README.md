@@ -270,3 +270,39 @@ uv run python -m molpipeline config.grid.json
 ```
 
 Use `uv sync --extra test --python 3.12` and `uv run --extra test python -m pytest tests` for testing. Pip alternative: `python -m pip install -e .`. Old `--extra chemberta` / `--extra catboost` commands are no longer needed. uv uses the project's `.venv`; use `uv run` consistently rather than the previous `.venv312` interpreter. The first ChemBERTa inference still downloads model weights; installing Torch/Transformers alone does not download the model.
+
+## Experiment durations in summary tables
+
+`performance_summary.csv`, `experiments.csv`, and the backward-compatible `summary.csv` now include `elapsed_seconds` and `elapsed_minutes`, taken from the saved experiment duration. This is total recorded experiment elapsed time, not training-only time or a new overall command timer. To avoid double counting the train/CV/test rows, performance_summary places duration only on the test row; train and CV duration cells are blank. You can sum elapsed_seconds directly across that file, or use experiments.csv (one row per experiment). Historical results without a recorded duration remain blank, not zero. Summing durations from resumed/historical experiments is not the current session's wall-clock duration.
+
+Refresh existing reports without loading datasets or training models:
+
+```powershell
+uv run python -m molpipeline --refresh-summaries results
+```
+
+New runs also update summaries after each completed experiment. Experiment JSON/model files remain unchanged by report refresh.
+
+## Original-label class metrics and partition timings
+
+`metrics.csv` and `performance_summary.csv` now include recall_0/1, precision_0/1, specificity_0/1, f1_0/1, f2_0/1, average_precision_0/1, and roc_auc_0/1. Suffixes always mean the original CSV label 0 or 1, not the minority/majority ordering. Training and test rows also include support_0/1 and per-class one-vs-rest confusion counts where available. Accuracy, balanced accuracy and MCC stay shared metrics rather than misleading class-specific duplicates. Specificity for class 0 equals recall for class 1, and vice versa. Binary complementary class ROC-AUC values agree; class AP values need not agree.
+
+Bare minority-oriented score columns in the readable tables are now explicitly named minority_recall, minority_precision, minority_specificity, minority_f1, minority_f2, minority_average_precision, and minority_roc_auc. The original JSON metric aliases and grid refit objective names remain backward compatible. GridSearchCV records both original-label class scores alongside the original eight scoring objectives; refit selection still uses the configured minority-positive balanced_accuracy/AP/F2 objective. AP/AUC always use continuous probabilities for the corresponding original class.
+
+Each partition row now has fit_seconds, score_seconds, partition_elapsed_seconds, partition_elapsed_minutes, timing_scope and timing_status:
+
+- train: final full-training fit/refit plus prediction/metric calculation on that training set. The fit is the selected final estimator's refit, not the entire grid search.
+- cv_validation_mean: mean fit plus mean scoring time per inner fold for the selected parameter candidate. This is an average, not total grid-search wall time. GridSearchCV measures these fold times.
+- test: held-out predictions and metric calculation only; fit_seconds is zero because the test data are never fitted.
+
+Total grid_search_seconds records the wall time of the complete search and its final refit. Overall elapsed_seconds/elapsed_minutes retain the complete experiment timer and appear only on the test row to avoid triple counting. These timings overlap or represent averages, so summing the partition times does not recover total experiment time. Feature generation, CSV exports, model saving and other overhead are included only in the overall experiment duration, not scoring timings. All new timing measurements use a monotonic performance counter.
+
+Refresh existing reports without training:
+
+```powershell
+uv run python -m molpipeline --refresh-summaries results
+```
+
+Old metrics are mapped to original labels wherever mathematically recoverable from saved label mappings and confusion counts. Unknown opposite-class AP or other unavailable historical CV class means are left blank, not inferred from aggregate means. Historical final-fit/train-scoring/test-scoring durations cannot be reconstructed and remain blank with timing_status=not_recorded. Existing CV candidate mean fit/score times can be recovered. New experiments record all class-specific metrics and partition timings directly. Refresh never modifies models, predictions or original experiment artifacts.
+
+If a summary CSV is open/locked (for example in Excel), refresh writes a `.updated.csv` sibling instead of failing or replacing the open file. Close the original and refresh again to update the standard filename. Per-class/timing update validation: 55 tests passed, including both minority-label orientations, reversed probability class ordering, all three refit objectives, ensemble tuning, exact mocked evaluation timing, historical metric mapping, unavailable historical times and locked-summary fallback. Existing upstream deprecation warnings remain.

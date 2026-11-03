@@ -55,3 +55,65 @@ def test_organize_rejects_corrupt_artifacts(tmp_path):
     m.atomic_json(source/'result.json',{'config':{},'artifacts':{'model.joblib':'invalid'}})
     organized,skipped=r.organize_existing(tmp_path,m.atomic_json,m.digest)
     assert not organized and 'checksum' in skipped[0] and source.exists()
+
+
+def test_durations_summarized_once_per_experiment(tmp_path):
+    for i,elapsed in enumerate([125.,None]):
+        dest=tmp_path/str(i);dest.mkdir()
+        result={'run_id':str(i),'experiment':{'dataset':'demo','model':'random_forest'},'metrics':{'accuracy':.8}}
+        if elapsed is not None:result['elapsed_seconds']=elapsed
+        m.atomic_json(dest/'result.json',result)
+        r.write_metric_table(dest,{'accuracy':1.},{'accuracy':.8},{'balanced_accuracy':.7},80,20)
+    r.update_summaries(tmp_path)
+    performance=pd.read_csv(tmp_path/'performance_summary.csv')
+    assert performance.elapsed_seconds.sum()==125.
+    assert performance.loc[performance.partition!='test','elapsed_seconds'].isna().all()
+    assert performance.loc[(performance.run_id==0)&(performance.partition=='test'),'elapsed_minutes'].iloc[0]==pytest.approx(125/60)
+    index=pd.read_csv(tmp_path/'experiments.csv')
+    assert index.elapsed_seconds.sum()==125.
+    assert pd.read_csv(tmp_path/'summary.csv').elapsed_seconds.sum()==125.
+
+
+def test_refresh_summaries_does_not_modify_experiment(tmp_path,monkeypatch):
+    dest=tmp_path/'experiment';dest.mkdir()
+    m.atomic_json(dest/'result.json',{'run_id':'saved','experiment':{'dataset':'demo'},
+                                    'metrics':{'accuracy':.8},'elapsed_seconds':60.})
+    before=(dest/'result.json').read_bytes()
+    monkeypatch.setattr('sys.argv',['molpipeline','--refresh-summaries',str(tmp_path)])
+    m.main()
+    assert (dest/'result.json').read_bytes()==before
+    table=pd.read_csv(tmp_path/'performance_summary.csv')
+    assert table.elapsed_seconds.iloc[0]==60.
+
+
+
+def test_legacy_mapping_and_unknown_partition_times(tmp_path):
+    dest=tmp_path/'old';dest.mkdir()
+    # Legacy confusion counts are minority-positive; the original minority is 0.
+    old={'recall':.5,'specificity':.75,'precision':.5,'f1':.5,'f2':.5,
+         'average_precision':.8,'roc_auc':.9,'tn':3,'fp':1,'fn':1,'tp':1}
+    r.write_metric_table(dest,old,old,{'recall':.5,'specificity':.75,'precision':.5},4,4)
+    m.atomic_json(dest/'result.json',{'run_id':'old','experiment':{'dataset':'old'},
+        'label_mapping':{'positive_original_label':0},'metrics':old,'elapsed_seconds':50.})
+    r.update_summaries(tmp_path)
+    table=pd.read_csv(tmp_path/'performance_summary.csv').set_index('partition')
+    assert table.loc['test','recall_0']==.5
+    assert table.loc['test','recall_1']==.75
+    assert table.loc['test','precision_1']==.75
+    assert pd.isna(table.loc['test','average_precision_1']) if 'average_precision_1' in table else True
+    assert pd.isna(table.loc['train','partition_elapsed_seconds'])
+    assert table.loc['train','timing_status']=='not_recorded'
+    assert 'recall' not in table
+
+
+def test_locked_summary_uses_alternate_file(tmp_path,monkeypatch):
+    target=tmp_path/'performance_summary.csv'
+    target.write_text('original remains open')
+    original=pd.DataFrame.to_csv
+    def locked(self,path,*args,**kwargs):
+        if str(path)==str(target):raise PermissionError('locked')
+        return original(self,path,*args,**kwargs)
+    monkeypatch.setattr(pd.DataFrame,'to_csv',locked)
+    r.save_summary(pd.DataFrame({'recall_0':[.8]}),target)
+    assert target.read_text()=='original remains open'
+    assert pd.read_csv(tmp_path/'performance_summary.updated.csv').recall_0.iloc[0]==.8
