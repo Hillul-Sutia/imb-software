@@ -331,8 +331,8 @@ def test_preflight_reports_all_conflicts_before_features(tmp_path, monkeypatch):
     monkeypatch.setattr(m,'estimator',forbidden)
     with pytest.raises(ValueError,match='validation failed for: a, b'):
         m.run(path)
-    run_dir=next((tmp_path/'results'/'logs').iterdir())
-    report=pd.read_csv(run_dir/'label_conflicts.csv')
+    run_dir=next((tmp_path/'results'/'validation').iterdir())
+    report=pd.concat([pd.read_csv(run_dir/name/'label_conflicts.csv') for name in ('a','b')],ignore_index=True)
     assert report.dataset.tolist()==['a','a','b','b']
     assert report.source_data_row.tolist()==[1,3,1,3]
     assert report.source_excel_row.tolist()==[2,4,2,4]
@@ -351,8 +351,52 @@ def test_validate_only_passes_without_features(tmp_path, monkeypatch):
     def forbidden(*args,**kwargs):pytest.fail('Validation must not generate features')
     monkeypatch.setattr(m,'features',forbidden)
     m.run(path,validate_only=True)
-    run_dir=next((tmp_path/'results'/'logs').iterdir())
-    report=json.loads((run_dir/'validation.json').read_text())
+    run_dir=next((tmp_path/'results'/'validation').iterdir())
+    report=json.loads((run_dir/'validation_summary.json').read_text())
     assert report['datasets'][0]['retained_rows']==2
-    assert not (run_dir/'label_conflicts.csv').exists()
+    assert not (run_dir/'a'/'label_conflicts.csv').exists()
+    cleaned=pd.read_csv(run_dir/'a'/'cleaned.csv')
+    assert cleaned.row_number.tolist()==[2,3]
+    assert cleaned.original_smiles.tolist()==['CCO','CCN']
+    assert cleaned.label.tolist()==[0,1]
+    assert cleaned.columns.tolist()==['row_number','original_smiles','processed_smiles','label']
     assert 'Run completed' in (run_dir/'run.log').read_text()
+
+
+def test_validation_layout_success_and_conflict_outputs(tmp_path):
+    good=tmp_path/'good.csv'
+    pd.DataFrame({'smiles':['CCO','OCC','invalid','CCN'],'label':[0,0,0,1]}).to_csv(good,index=False)
+    bad=tmp_path/'bad.csv'
+    pd.DataFrame({'smiles':['CCO','OCC','CCN'],'label':[0,1,1]}).to_csv(bad,index=False)
+    before=good.read_bytes()
+    cfg={'datasets':[{'name':'good','path':'good.csv','invalid_smiles':'skip'},
+                     {'name':'bad','path':'bad.csv'}]}
+    p=tmp_path/'config.json';p.write_text(json.dumps(cfg))
+    with pytest.raises(ValueError,match='failed for: bad'):m.run(p,validate_only=True)
+    folder=next((tmp_path/'results'/'validation').iterdir())
+    assert good.read_bytes()==before
+    clean=pd.read_csv(folder/'good'/'cleaned.csv')
+    assert clean.processed_smiles.tolist()==['CCO','CCN']
+    assert clean.columns.tolist()==['row_number','original_smiles','processed_smiles','label']
+    assert clean.row_number.tolist()==[2,5]
+    assert len(pd.read_csv(folder/'good'/'excluded_rows.csv'))==1
+    assert not (folder/'bad'/'cleaned.csv').exists()
+    assert len(pd.read_csv(folder/'bad'/'label_conflicts.csv'))==2
+    summary=json.loads((folder/'validation_summary.json').read_text())
+    assert summary['datasets'][0]['duplicate_rows_removed']==1
+    assert (folder/summary['datasets'][0]['cleaned_file']).exists()
+    assert (folder/summary['datasets'][1]['conflict_report']).exists()
+
+
+def test_validation_timestamp_collision_and_safe_dataset_names(tmp_path,monkeypatch):
+    from types import SimpleNamespace
+    actual_time=m.time
+    monkeypatch.setattr(m,'time',SimpleNamespace(strftime=lambda fmt:'2026-11-05_10-45-43',perf_counter=actual_time.perf_counter))
+    pd.DataFrame({'smiles':['CCO','CCN'],'label':[0,1]}).to_csv(tmp_path/'a.csv',index=False)
+    cfg={'datasets':[{'name':'../a','path':'a.csv'},{'name':'a','path':'a.csv'}]}
+    p=tmp_path/'config.json';p.write_text(json.dumps(cfg))
+    m.run(p,validate_only=True);m.run(p,validate_only=True)
+    root=tmp_path/'results'/'validation'
+    assert {d.name for d in root.iterdir()}=={'2026-11-05_10-45-43','2026-11-05_10-45-43_02'}
+    assert (root/'2026-11-05_10-45-43'/'a'/'cleaned.csv').exists()
+    assert (root/'2026-11-05_10-45-43'/'a_02'/'cleaned.csv').exists()

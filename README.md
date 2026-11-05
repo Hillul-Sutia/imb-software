@@ -307,21 +307,44 @@ Old metrics are mapped to original labels wherever mathematically recoverable fr
 
 If a summary CSV is open/locked (for example in Excel), refresh writes a `.updated.csv` sibling instead of failing or replacing the open file. Close the original and refresh again to update the standard filename. Per-class/timing update validation: 55 tests passed, including both minority-label orientations, reversed probability class ordering, all three refit objectives, ensemble tuning, exact mocked evaluation timing, historical metric mapping, unavailable historical times and locked-summary fallback. Existing upstream deprecation warnings remain.
 
-## Validate data before training
+## Validate data and save cleaned CSVs before training
 
 ```powershell
 uv run python -m molpipeline config.grid.json --validate-only
 ```
 
-Validation checks each dataset selected by the experiment configuration once, without generating features, splitting data, or fitting models. Normal training and feature export run the same checks before proceeding. If any selected dataset fails, the command returns an error after checking the other selected datasets. Raw files are unchanged and conflicting labels are never silently dropped or relabeled.
+Normal training and feature-only exports perform the same preflight before proceeding. All selected datasets are checked, with each prepared only once per run. If any dataset fails, all selected datasets still receive validation reports, then fitting stops. Raw files are never modified and conflicting labels are never silently dropped or relabeled.
 
-The command prints its run log path under `results/logs/run-.../` (relative to the configured output directory). Open:
+Outputs use readable local-machine timestamps (with `_02`, `_03`, etc. on same-second collisions):
 
-- `validation.json` for pass/fail status, dataset paths, cleaning counts and validation errors.
-- `label_conflicts.csv` when conflicts exist, for dataset, source path, target column, one-based data row, original SMILES, canonical SMILES and label. Rows sharing a canonical SMILES within the same dataset form one conflict group.
-- `run.log` for timestamped validation, experiment progress and exception details. Experiment failures also record their stage in `error.json`.
+```text
+results/
+  validation/
+    2026-11-05_10-45-43/
+      run.log
+      validation_summary.json
+      BBBP/
+        validation.json
+        label_conflicts.csv       # only when conflicts exist
+        excluded_rows.csv         # invalid rows skipped under explicit policy
+      HIV/
+        validation.json
+        data_quality.json
+        cleaned.csv               # only after this dataset passes
+        excluded_rows.csv
+```
 
-`--plan` still only previews the matrix. Dataset preparation now happens once per run before the experiment loop, so per-experiment elapsed times exclude that shared preflight. Existing artifacts are not overwritten by validation. Code changes can produce new experiment IDs under the existing resume rules.
+The base directory follows the configured output_dir. Dataset names are sanitized for safe Windows folder names, with readable numeric suffixes for collisions. The summary maps original dataset names to the actual report folders. Old logs/validation outputs are preserved and are not automatically moved.
+
+`validation_summary.json` lists each dataset's pass/fail status and report paths. Each dataset's `validation.json` contains only that dataset's validation details. `run.log` records validation, experiment progress and exceptions. Failing experiments also record their stage in error.json.
+
+`label_conflicts.csv` identifies the dataset, source path, target column, original source data row, original SMILES, canonical SMILES and label. Use source_excel_row to locate the row in the original dataset opened in Excel: header=1, first data record=2. source_data_row remains the original 1-based data record position excluding the header. These are CSV records rather than physical text lines for quoted multiline values.
+
+`cleaned.csv` is saved only for datasets that pass validation, even if another selected dataset fails. It contains exactly `row_number`, `original_smiles`, `processed_smiles` and `label`. The row_number locates the retained record in the original source CSV opened in Excel (header=1); processed_smiles is the canonical SMILES used for feature generation. Labels retain their original 0/1 values. Invalid structures are removed only under invalid_smiles=skip; consistent canonical duplicates retain the first occurrence. Their counts are recorded in data_quality.json. A dataset with conflicting labels does not get a cleaned.csv that could be mistaken as ready for fitting. Fix the reported labels or prepare an explicitly audited conflict-exclusion policy first.
+
+The current run uses the same prepared table in memory; it does not reread the saved cleaned CSV. To reuse a cleaned file in a later config, point `path` at it and set smiles_column=processed_smiles and target_column=label. Its source row columns refer to the original raw file as saved; a later load of that cleaned file numbers source records relative to that input file. Do not confuse those provenance conventions.
+
+`--plan` remains a matrix preview. Per-experiment elapsed times exclude shared preflight. Existing completed artifacts remain unchanged; code changes can produce new experiment IDs under existing resume rules.
 
 
-Conflict reports now include `source_excel_row` before `source_data_row`. Use `source_excel_row` to locate a record in the original dataset opened in Excel: its header is row 1 and its first data record is row 2. Thus data record 101 corresponds to source_excel_row 102. This is the original dataset row, not the row occupied by the entry in the conflict report. The existing `source_data_row` is retained (first data record=1, header excluded) for compatibility with other pipeline reports. These are CSV record positions, not physical text-line numbers for quoted multiline records. Validation.json explains both conventions. Previously generated conflict reports are unchanged; rerun --validate-only to create a new report with the new column.
+The cleaned.csv inspection file represents all retained molecules before splitting, not only the training partition. Use each experiment's split.json to identify its training/test assignment. Unresolved label conflicts still prevent a dataset from producing a file marked as cleaned.

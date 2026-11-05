@@ -6,7 +6,6 @@ import importlib.metadata as metadata
 import itertools
 import json
 import logging
-import tempfile
 import os
 from pathlib import Path
 import platform
@@ -48,8 +47,10 @@ LOG = logging.getLogger(__name__)
 
 
 class LabelConflictError(ValueError):
-    def __init__(self, rows):
+    def __init__(self, rows, excluded_rows=None, input_rows=None):
         self.rows = rows
+        self.excluded_rows = excluded_rows or []
+        self.input_rows = input_rows
         super().__init__(f'Conflicting labels for the same canonical molecule: '
                          f'{rows.smiles.nunique()} groups, {len(rows)} source rows')
 
@@ -91,8 +92,7 @@ def load_data(spec, root):
     out = pd.DataFrame(records, columns=['smiles', 'label', 'scaffold', 'source_data_row', 'original_smiles'])
     conflicts = out.groupby('smiles').label.transform('nunique') > 1
     if conflicts.any():
-        raise LabelConflictError(out.loc[conflicts].sort_values(['smiles', 'source_data_row']))
-    out = out.drop(columns='original_smiles')
+        raise LabelConflictError(out.loc[conflicts].sort_values(['smiles', 'source_data_row']), excluded, len(df))
     cleaned = out.drop_duplicates('smiles').reset_index(drop=True)
     if cleaned.label.nunique() != 2:
         raise ValueError('Both binary classes must remain after invalid-SMILES filtering and deduplication')
@@ -384,41 +384,70 @@ def combinations(cfg):
     return combos
 
 
+def validation_dataset_name(name, used):
+    safe = re.sub(r'[^A-Za-z0-9_.-]+', '_', str(name)).strip(' ._')[:64] or 'dataset'
+    if safe.split('.')[0].upper() in {'CON','PRN','AUX','NUL',*(f'COM{i}' for i in range(1,10)),*(f'LPT{i}' for i in range(1,10))}:
+        safe = 'dataset_' + safe
+    candidate, number = safe, 2
+    while candidate.casefold() in used:
+        candidate = f'{safe}_{number:02d}'
+        number += 1
+    used.add(candidate.casefold())
+    return candidate
+
+
 def preflight(specs, selected, root, run_dir):
-    prepared, checks, conflict_tables = {}, [], []
-    conflict_path = run_dir / 'label_conflicts.csv'
-    columns = ['dataset', 'source_path', 'target_column', 'source_excel_row', 'source_data_row',
-               'original_smiles', 'canonical_smiles', 'label']
+    prepared, checks, used = {}, [], set()
+    conflict_columns = ['dataset', 'source_path', 'target_column', 'source_excel_row', 'source_data_row',
+                        'original_smiles', 'canonical_smiles', 'label']
     for name in selected:
         spec = specs[name]
-        details = {'dataset': name, 'source_path': spec['path'],
+        folder_name = validation_dataset_name(name, used)
+        folder = run_dir / folder_name
+        folder.mkdir()
+        conflict_path = folder / 'label_conflicts.csv'
+        details = {'dataset': name, 'source_path': spec['path'], 'report_folder': folder_name,
                    'target_column': spec.get('target_column', 'label')}
         LOG.info('Validating dataset=%s target=%s path=%s', name, details['target_column'], spec['path'])
         try:
             data, checksum = load_data(spec, root)
             prepared[name] = data, checksum
-            checks.append(dict(details, status='passed', **data.attrs.get('data_quality', {})))
-            LOG.info('Dataset %s passed: %s retained rows; quality=%s', name, len(data), data.attrs.get('data_quality', {}))
+            clean = data.copy()
+            if 'source_data_row' not in clean:
+                clean['source_data_row'] = np.arange(len(clean))+1
+            if 'original_smiles' not in clean:
+                clean['original_smiles'] = clean.smiles
+            clean.insert(0, 'row_number', clean.source_data_row+1)
+            clean = clean.rename(columns={'smiles': 'processed_smiles'})
+            clean[['row_number','original_smiles','processed_smiles','label']].to_csv(folder/'cleaned.csv', index=False)
+            pd.DataFrame(data.attrs.get('excluded_rows', []), columns=['source_data_row','smiles','label','reason']).assign(
+                source_excel_row=lambda frame: frame.source_data_row+1).to_csv(folder/'excluded_rows.csv', index=False)
+            check = dict(details, status='passed', cleaned_file=f'{folder_name}/cleaned.csv', input_sha256=checksum,
+                         **data.attrs.get('data_quality', {}))
+            atomic_json(folder/'data_quality.json', data.attrs.get('data_quality', {}))
+            LOG.info('Dataset %s passed: %s retained rows; cleaned file=%s', name, len(data), folder/'cleaned.csv')
         except (ValueError, OSError) as exc:
             check = dict(details, status='failed', error=str(exc))
             if isinstance(exc, LabelConflictError):
                 rows = exc.rows.rename(columns={'smiles': 'canonical_smiles'}).assign(**details)
                 rows['source_excel_row'] = rows['source_data_row'] + 1
-                conflict_tables.append(rows[columns])
+                rows[conflict_columns].to_csv(conflict_path, index=False)
+                pd.DataFrame(exc.excluded_rows, columns=['source_data_row','smiles','label','reason']).assign(
+                    source_excel_row=lambda frame: frame.source_data_row+1).to_csv(folder/'excluded_rows.csv', index=False)
                 check.update(conflict_groups=int(rows.canonical_smiles.nunique()),
-                             conflicting_rows=len(rows), conflict_report=conflict_path.name)
-            checks.append(check)
-            LOG.error('Dataset %s failed: %s%s', name, exc,
-                      f'; conflict report: {conflict_path}' if isinstance(exc, LabelConflictError) else '')
-    if conflict_tables:
-        pd.concat(conflict_tables, ignore_index=True).to_csv(conflict_path, index=False)
-    atomic_json(run_dir / 'validation.json', {'datasets': checks,
+                             conflicting_rows=len(rows), conflict_report=f'{folder_name}/label_conflicts.csv',
+                             input_rows=exc.input_rows, invalid_smiles_removed=len(exc.excluded_rows))
+            LOG.error('Dataset %s failed: %s; dataset report: %s', name, exc, folder/'validation.json')
+        atomic_json(folder/'validation.json', check)
+        checks.append(check)
+    summary = run_dir/'validation_summary.json'
+    atomic_json(summary, {'datasets': checks,
         'conflict_row_numbering': {'source_excel_row': 'Original source table row: header=1, first data record=2',
                                   'source_data_row': 'Original source data record: first data record=1, excludes header'}})
     failed = [check['dataset'] for check in checks if check['status'] == 'failed']
     if failed:
-        raise ValueError(f"Dataset validation failed for: {', '.join(failed)}. See {run_dir / 'validation.json'}"
-                         + (f' and {conflict_path}' if conflict_tables else ''))
+        raise ValueError(f"Dataset validation failed for: {', '.join(failed)}. See {summary}; "
+                         'conflict reports, when present, are in the respective dataset folders')
     return prepared
 
 
@@ -427,9 +456,17 @@ def run(config_path, plan=False, export_only=False, validate_only=False):
     cfg = json.loads(config_path.read_text(encoding='utf-8-sig'))
     if plan:
         return _run(config_path, cfg, plan=True)
-    logs = config_path.parent / cfg.get('output_dir', 'results') / 'logs'
+    logs = config_path.parent / cfg.get('output_dir', 'results') / 'validation'
     logs.mkdir(parents=True, exist_ok=True)
-    run_dir = Path(tempfile.mkdtemp(prefix=time.strftime('run-%Y%m%d-%H%M%S-'), dir=logs))
+    timestamp = time.strftime('%Y-%m-%d_%H-%M-%S')
+    number = 1
+    while True:
+        run_dir = logs / (timestamp if number == 1 else f'{timestamp}_{number:02d}')
+        try:
+            run_dir.mkdir()
+            break
+        except FileExistsError:
+            number += 1
     handler = logging.FileHandler(run_dir / 'run.log', encoding='utf-8')
     handler.setFormatter(logging.Formatter('%(asctime)s %(levelname)s %(name)s %(message)s'))
     previous_level = LOG.level
@@ -466,7 +503,7 @@ def _run(config_path, cfg, plan=False, export_only=False, validate_only=False, r
     specs = {d['name']: d for d in cfg['datasets']}
     prepared = preflight(specs, dict.fromkeys(c['dataset'] for c in combos), root, run_dir)
     if validate_only:
-        print(f'Validated {len(prepared)} dataset(s). Report: {run_dir / "validation.json"}')
+        print(f'Validated {len(prepared)} dataset(s). Report: {run_dir / "validation_summary.json"}')
         return
     if export_only:
         for dataset, kind in dict.fromkeys((c['dataset'], c['feature']) for c in combos):
