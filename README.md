@@ -348,3 +348,17 @@ The current run uses the same prepared table in memory; it does not reread the s
 
 
 The cleaned.csv inspection file represents all retained molecules before splitting, not only the training partition. Use each experiment's split.json to identify its training/test assignment. Unresolved label conflicts still prevent a dataset from producing a file marked as cleaned.
+
+## Cross-platform cache directories
+
+No OS-specific launcher is required. Use the same commands on Windows or Linux:
+
+```shell
+uv sync --python 3.12
+uv run python -m generate_config
+uv run python -m molpipeline config.grid.json
+```
+
+Python pathlib resolves `.cache/features` and `.cache/runtime` relative to the config file. Model downloads, Torch/compiler caches and temporary training files are routed beneath the runtime cache; paths are recorded in each validation run's cache_locations.json. The context restores process environment settings on exit. `MOLPIPELINE_RUNTIME_CACHE` and `MOLPIPELINE_FEATURE_CACHE` remain optional environment overrides. uv package caching defaults to `.cache/uv` via pyproject.toml.
+
+Put the project/config on the drive where you want its caches stored. Existing C-drive caches are not deleted or migrated. Python runtime settings cannot redirect uv-managed Python downloads, operating-system files or bytecode produced before the program starts; those remain subject to the external tool/system settings. The former project.ps1 launcher has been removed.

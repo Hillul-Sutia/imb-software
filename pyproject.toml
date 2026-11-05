@@ -26,7 +26,10 @@ mol-experiment = "molpipeline:main"
 mol-config = "generate_config:main"
 
 [tool.setuptools]
-py-modules = ["molpipeline", "generate_config", "result_reporting"]
+py-modules = ["molpipeline", "generate_config", "result_reporting", "runtime_cache"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+
+[tool.uv]
+cache-dir = ".cache/uv"

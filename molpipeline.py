@@ -15,6 +15,8 @@ import time
 
 import joblib
 import result_reporting as reporting
+from runtime_cache import cache_environment
+import runtime_cache
 import numpy as np
 import pandas as pd
 from sklearn.base import BaseEstimator, ClassifierMixin
@@ -150,8 +152,8 @@ def features(data, kind, cfg, cache):
             raise ValueError('ChemBERTa requires an immutable Hugging Face commit revision')
         torch.manual_seed(cfg.get('seed', 42))
         torch.use_deterministic_algorithms(True)
-        tokenizer = AutoTokenizer.from_pretrained(model_id, revision=revision)
-        model = AutoModel.from_pretrained(model_id, revision=revision).to('cpu').eval()
+        tokenizer = AutoTokenizer.from_pretrained(model_id, revision=revision, cache_dir=os.environ.get('HF_HUB_CACHE'))
+        model = AutoModel.from_pretrained(model_id, revision=revision, cache_dir=os.environ.get('HF_HUB_CACHE')).to('cpu').eval()
         arrays = []
         batch = settings.get('batch_size', 32)
         with torch.no_grad():
@@ -452,6 +454,13 @@ def preflight(specs, selected, root, run_dir):
 
 
 def run(config_path, plan=False, export_only=False, validate_only=False):
+    path = Path(config_path).resolve()
+    cfg = json.loads(path.read_text(encoding='utf-8-sig'))
+    with cache_environment(path.parent, cfg):
+        return run_with_log(path, plan, export_only, validate_only)
+
+
+def run_with_log(config_path, plan=False, export_only=False, validate_only=False):
     config_path = Path(config_path).resolve()
     cfg = json.loads(config_path.read_text(encoding='utf-8-sig'))
     if plan:
@@ -474,6 +483,9 @@ def run(config_path, plan=False, export_only=False, validate_only=False):
     LOG.setLevel(logging.INFO)
     print(f'Run log: {handler.baseFilename}', flush=True)
     try:
+        atomic_json(run_dir/'cache_locations.json', {key: os.environ.get(key) for key in (
+            'HF_HOME','HF_HUB_CACHE','HF_XET_CACHE','TORCH_HOME','JOBLIB_TEMP_FOLDER',
+            'TEMP','PYTHONPYCACHEPREFIX','UV_CACHE_DIR','MOLPIPELINE_FEATURE_CACHE')})
         LOG.info('Starting config=%s validate_only=%s export_only=%s', config_path, validate_only, export_only)
         result = _run(config_path, cfg, export_only=export_only, validate_only=validate_only, run_dir=run_dir)
         LOG.info('Run completed')
@@ -499,7 +511,7 @@ def _run(config_path, cfg, plan=False, export_only=False, validate_only=False, r
         print(json.dumps(combos, indent=2)); return combos
     output = root / cfg.get('output_dir', 'results')
     output.mkdir(parents=True, exist_ok=True)
-    cache = root / cfg.get('cache_dir', '.cache/features')
+    cache = Path(os.environ.get('MOLPIPELINE_FEATURE_CACHE') or root / cfg.get('cache_dir', '.cache/features'))
     specs = {d['name']: d for d in cfg['datasets']}
     prepared = preflight(specs, dict.fromkeys(c['dataset'] for c in combos), root, run_dir)
     if validate_only:
@@ -514,7 +526,7 @@ def _run(config_path, cfg, plan=False, export_only=False, validate_only=False, r
             print(f"Exported: {output / exported['csv'].removeprefix('../')}")
         return
     environment = versions()
-    code_hash = hashlib.sha256(Path(__file__).read_bytes() + Path(reporting.__file__).read_bytes()).hexdigest()
+    code_hash = hashlib.sha256(Path(__file__).read_bytes() + Path(reporting.__file__).read_bytes() + Path(runtime_cache.__file__).read_bytes()).hexdigest()
     reference = reporting.shared_run(output, cfg, environment, code_hash, atomic_json, digest)
     failures = []
     for combo in combos:

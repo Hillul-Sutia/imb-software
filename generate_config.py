@@ -98,7 +98,7 @@ def generate(raw_dir='data/raw', output='config.grid.json', targets=None,
     datasets, notices = discover(raw_dir, output.parent, targets)
     cfg = {'datasets': datasets, 'seeds': [42], 'test_size': .2, 'cv_folds': 5,
            'refit_metric': refit_metric, 'search_jobs': 1,
-           'output_dir': 'results', 'cache_dir': '.cache/features',
+           'output_dir': 'results', 'cache_dir': '.cache/features', 'runtime_cache_dir': '.cache/runtime',
            'matrix': {'feature': ['morgan', 'chemberta'], 'split': ['random'],
                       'model': ['random_forest', 'catboost'], 'strategy': ['default', 'mtune'],
                       'optimization': ['default', 'grid']},
