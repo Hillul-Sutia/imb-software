@@ -183,7 +183,7 @@ def organize_existing(output, atomic_json, digest):
     output = Path(output).resolve()
     organized, skipped = [], []
     for source in list(output.iterdir()):
-        if not source.is_dir() or source.name.startswith('_') or source.name == 'features':
+        if not source.is_dir() or source.name.startswith('_') or source.name in ('features', 'logs'):
             continue
         done = source / 'result.json'
         if not done.exists():

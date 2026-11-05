@@ -306,3 +306,22 @@ uv run python -m molpipeline --refresh-summaries results
 Old metrics are mapped to original labels wherever mathematically recoverable from saved label mappings and confusion counts. Unknown opposite-class AP or other unavailable historical CV class means are left blank, not inferred from aggregate means. Historical final-fit/train-scoring/test-scoring durations cannot be reconstructed and remain blank with timing_status=not_recorded. Existing CV candidate mean fit/score times can be recovered. New experiments record all class-specific metrics and partition timings directly. Refresh never modifies models, predictions or original experiment artifacts.
 
 If a summary CSV is open/locked (for example in Excel), refresh writes a `.updated.csv` sibling instead of failing or replacing the open file. Close the original and refresh again to update the standard filename. Per-class/timing update validation: 55 tests passed, including both minority-label orientations, reversed probability class ordering, all three refit objectives, ensemble tuning, exact mocked evaluation timing, historical metric mapping, unavailable historical times and locked-summary fallback. Existing upstream deprecation warnings remain.
+
+## Validate data before training
+
+```powershell
+uv run python -m molpipeline config.grid.json --validate-only
+```
+
+Validation checks each dataset selected by the experiment configuration once, without generating features, splitting data, or fitting models. Normal training and feature export run the same checks before proceeding. If any selected dataset fails, the command returns an error after checking the other selected datasets. Raw files are unchanged and conflicting labels are never silently dropped or relabeled.
+
+The command prints its run log path under `results/logs/run-.../` (relative to the configured output directory). Open:
+
+- `validation.json` for pass/fail status, dataset paths, cleaning counts and validation errors.
+- `label_conflicts.csv` when conflicts exist, for dataset, source path, target column, one-based data row, original SMILES, canonical SMILES and label. Rows sharing a canonical SMILES within the same dataset form one conflict group.
+- `run.log` for timestamped validation, experiment progress and exception details. Experiment failures also record their stage in `error.json`.
+
+`--plan` still only previews the matrix. Dataset preparation now happens once per run before the experiment loop, so per-experiment elapsed times exclude that shared preflight. Existing artifacts are not overwritten by validation. Code changes can produce new experiment IDs under the existing resume rules.
+
+
+Conflict reports now include `source_excel_row` before `source_data_row`. Use `source_excel_row` to locate a record in the original dataset opened in Excel: its header is row 1 and its first data record is row 2. Thus data record 101 corresponds to source_excel_row 102. This is the original dataset row, not the row occupied by the entry in the conflict report. The existing `source_data_row` is retained (first data record=1, header excluded) for compatibility with other pipeline reports. These are CSV record positions, not physical text-line numbers for quoted multiline records. Validation.json explains both conventions. Previously generated conflict reports are unchanged; rerun --validate-only to create a new report with the new column.

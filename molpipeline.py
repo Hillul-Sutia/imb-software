@@ -5,6 +5,8 @@ from functools import partial
 import importlib.metadata as metadata
 import itertools
 import json
+import logging
+import tempfile
 import os
 from pathlib import Path
 import platform
@@ -42,6 +44,16 @@ def atomic_json(path, value):
     os.replace(tmp, path)
 
 
+LOG = logging.getLogger(__name__)
+
+
+class LabelConflictError(ValueError):
+    def __init__(self, rows):
+        self.rows = rows
+        super().__init__(f'Conflicting labels for the same canonical molecule: '
+                         f'{rows.smiles.nunique()} groups, {len(rows)} source rows')
+
+
 def load_data(spec, root):
     path = root / spec['path']
     df = pd.read_csv(path)
@@ -75,10 +87,12 @@ def load_data(spec, root):
         records.append({'smiles': Chem.MolToSmiles(mol, isomericSmiles=True),
                         'label': int(df[target].iloc[row]),
                         'scaffold': MurckoScaffold.MurckoScaffoldSmiles(mol=mol),
-                        'source_data_row': row + 1})
-    out = pd.DataFrame(records, columns=['smiles', 'label', 'scaffold', 'source_data_row'])
-    if len(out) and out.groupby('smiles').label.nunique().max() > 1:
-        raise ValueError('Conflicting labels for the same canonical molecule')
+                        'source_data_row': row + 1, 'original_smiles': str(value)})
+    out = pd.DataFrame(records, columns=['smiles', 'label', 'scaffold', 'source_data_row', 'original_smiles'])
+    conflicts = out.groupby('smiles').label.transform('nunique') > 1
+    if conflicts.any():
+        raise LabelConflictError(out.loc[conflicts].sort_values(['smiles', 'source_data_row']))
+    out = out.drop(columns='original_smiles')
     cleaned = out.drop_duplicates('smiles').reset_index(drop=True)
     if cleaned.label.nunique() != 2:
         raise ValueError('Both binary classes must remain after invalid-SMILES filtering and deduplication')
@@ -370,11 +384,75 @@ def combinations(cfg):
     return combos
 
 
-def run(config_path, plan=False, export_only=False):
+def preflight(specs, selected, root, run_dir):
+    prepared, checks, conflict_tables = {}, [], []
+    conflict_path = run_dir / 'label_conflicts.csv'
+    columns = ['dataset', 'source_path', 'target_column', 'source_excel_row', 'source_data_row',
+               'original_smiles', 'canonical_smiles', 'label']
+    for name in selected:
+        spec = specs[name]
+        details = {'dataset': name, 'source_path': spec['path'],
+                   'target_column': spec.get('target_column', 'label')}
+        LOG.info('Validating dataset=%s target=%s path=%s', name, details['target_column'], spec['path'])
+        try:
+            data, checksum = load_data(spec, root)
+            prepared[name] = data, checksum
+            checks.append(dict(details, status='passed', **data.attrs.get('data_quality', {})))
+            LOG.info('Dataset %s passed: %s retained rows; quality=%s', name, len(data), data.attrs.get('data_quality', {}))
+        except (ValueError, OSError) as exc:
+            check = dict(details, status='failed', error=str(exc))
+            if isinstance(exc, LabelConflictError):
+                rows = exc.rows.rename(columns={'smiles': 'canonical_smiles'}).assign(**details)
+                rows['source_excel_row'] = rows['source_data_row'] + 1
+                conflict_tables.append(rows[columns])
+                check.update(conflict_groups=int(rows.canonical_smiles.nunique()),
+                             conflicting_rows=len(rows), conflict_report=conflict_path.name)
+            checks.append(check)
+            LOG.error('Dataset %s failed: %s%s', name, exc,
+                      f'; conflict report: {conflict_path}' if isinstance(exc, LabelConflictError) else '')
+    if conflict_tables:
+        pd.concat(conflict_tables, ignore_index=True).to_csv(conflict_path, index=False)
+    atomic_json(run_dir / 'validation.json', {'datasets': checks,
+        'conflict_row_numbering': {'source_excel_row': 'Original source table row: header=1, first data record=2',
+                                  'source_data_row': 'Original source data record: first data record=1, excludes header'}})
+    failed = [check['dataset'] for check in checks if check['status'] == 'failed']
+    if failed:
+        raise ValueError(f"Dataset validation failed for: {', '.join(failed)}. See {run_dir / 'validation.json'}"
+                         + (f' and {conflict_path}' if conflict_tables else ''))
+    return prepared
+
+
+def run(config_path, plan=False, export_only=False, validate_only=False):
     config_path = Path(config_path).resolve()
-    root = config_path.parent
     cfg = json.loads(config_path.read_text(encoding='utf-8-sig'))
-    for spec in cfg.get('datasets', []):
+    if plan:
+        return _run(config_path, cfg, plan=True)
+    logs = config_path.parent / cfg.get('output_dir', 'results') / 'logs'
+    logs.mkdir(parents=True, exist_ok=True)
+    run_dir = Path(tempfile.mkdtemp(prefix=time.strftime('run-%Y%m%d-%H%M%S-'), dir=logs))
+    handler = logging.FileHandler(run_dir / 'run.log', encoding='utf-8')
+    handler.setFormatter(logging.Formatter('%(asctime)s %(levelname)s %(name)s %(message)s'))
+    previous_level = LOG.level
+    LOG.addHandler(handler)
+    LOG.setLevel(logging.INFO)
+    print(f'Run log: {handler.baseFilename}', flush=True)
+    try:
+        LOG.info('Starting config=%s validate_only=%s export_only=%s', config_path, validate_only, export_only)
+        result = _run(config_path, cfg, export_only=export_only, validate_only=validate_only, run_dir=run_dir)
+        LOG.info('Run completed')
+        return result
+    except Exception:
+        LOG.exception('Run failed')
+        raise
+    finally:
+        LOG.removeHandler(handler)
+        LOG.setLevel(previous_level)
+        handler.close()
+
+
+def _run(config_path, cfg, plan=False, export_only=False, validate_only=False, run_dir=None):
+    root = config_path.parent
+    for spec in (cfg.get('datasets', []) if plan else []):
         for field in ('smiles_column', 'target_column'):
             if field in spec and (not isinstance(spec[field], str) or not spec[field].strip()):
                 raise ValueError(f"Dataset {spec.get('name')!r}: fill {field} in the config before running")
@@ -386,10 +464,14 @@ def run(config_path, plan=False, export_only=False):
     output.mkdir(parents=True, exist_ok=True)
     cache = root / cfg.get('cache_dir', '.cache/features')
     specs = {d['name']: d for d in cfg['datasets']}
+    prepared = preflight(specs, dict.fromkeys(c['dataset'] for c in combos), root, run_dir)
+    if validate_only:
+        print(f'Validated {len(prepared)} dataset(s). Report: {run_dir / "validation.json"}')
+        return
     if export_only:
         for dataset, kind in dict.fromkeys((c['dataset'], c['feature']) for c in combos):
             spec = specs[dataset]
-            data, data_hash = load_data(spec, root)
+            data, data_hash = prepared[dataset]
             x = features(data, kind, cfg, cache)
             exported = export_features(data, x, kind, cfg, output, spec, data_hash)
             print(f"Exported: {output / exported['csv'].removeprefix('../')}")
@@ -400,12 +482,13 @@ def run(config_path, plan=False, export_only=False):
     failures = []
     for combo in combos:
         started = time.perf_counter()
-        data, data_hash = load_data(specs[combo['dataset']], root)
+        data, data_hash = prepared[combo['dataset']]
         identity = dict(experiment=combo, config=cfg, data_hash=data_hash,
                         versions=environment, code_hash=code_hash)
         run_id = digest(identity)[:24]
         dest = output / reporting.experiment_folder(combo, run_id, cfg)
         focused = reporting.experiment_metadata(combo, cfg, data_hash, environment, code_hash, reference)
+        LOG.info('Experiment %s: %s', run_id, combo)
         done = dest / 'result.json'
         if done.exists():
             saved = json.loads(done.read_text())
@@ -415,19 +498,24 @@ def run(config_path, plan=False, export_only=False):
                 if exported and (not (dest/exported['metadata']).exists() or not (dest/exported['csv']).exists() or hashlib.sha256((dest/exported['csv']).read_bytes()).hexdigest() != exported['sha256']):
                     x = features(data, combo['feature'], cfg, cache)
                     export_features(data, x, combo['feature'], cfg, output, specs[combo['dataset']], data_hash)
+                LOG.info('Resumed verified experiment %s', dest.name)
                 print(f'Resume: {dest.name}'); reporting.update_summaries(output); continue
         dest.mkdir(parents=True, exist_ok=True)
         done.unlink(missing_ok=True)
         atomic_json(dest / 'manifest.json', focused)
+        stage = 'prepare artifacts'
         try:
             atomic_json(dest / 'data_quality.json', data.attrs.get('data_quality', {}))
             pd.DataFrame(data.attrs.get('excluded_rows', []),
                          columns=['source_data_row','smiles','label','reason']).to_csv(dest / 'excluded_rows.csv', index=False)
+            stage = 'feature generation and export'
+            LOG.info('Experiment %s: %s', run_id, stage)
             x = features(data, combo['feature'], cfg, cache)
             exported = export_features(data, x, combo['feature'], cfg, output, specs[combo['dataset']], data_hash)
             focused['feature_export'] = exported
             atomic_json(dest / 'feature_export.json', exported)
             atomic_json(dest / 'manifest.json', focused)
+            stage = 'splitting'
             tr, te = partition(data, combo['split'], cfg.get('test_size', .2), combo['seed'])
             groups = data.scaffold.to_numpy() if combo['split'] == 'scaffold' else data.smiles.to_numpy()
             atomic_json(dest / 'split.json', {'train': tr.tolist(), 'test': te.tolist(),
@@ -439,6 +527,8 @@ def run(config_path, plan=False, export_only=False):
             best_params, best_score = {}, None
             grid_search_seconds = None
             partition_timings = {}
+            stage = 'fitting and tuning'
+            LOG.info('Experiment %s: %s', run_id, stage)
             if combo['optimization'] == 'grid':
                 cv = folds(y[tr], groups[tr], cfg.get('cv_folds', 5), combo['seed'])
                 atomic_json(dest / 'cv.json', [{'train': tr[a].tolist(), 'validation': tr[b].tolist()} for a, b in cv])
@@ -463,6 +553,7 @@ def run(config_path, plan=False, export_only=False):
                 fit_started = time.perf_counter()
                 model.fit(x[tr], y[tr])
                 final_fit_seconds = time.perf_counter()-fit_started
+            stage = 'evaluation and reporting'
             test_metrics, pred, prob, minority_prob, test_score_seconds = evaluate_partition(model, x[te], y[te], positive)
             partition_timings['test'] = {'fit_seconds': 0., 'score_seconds': test_score_seconds,
                 'partition_elapsed_seconds': test_score_seconds, 'timing_scope': 'held-out prediction and metric calculation only'}
@@ -498,9 +589,11 @@ def run(config_path, plan=False, export_only=False):
                 n_train=len(tr), n_test=len(te), elapsed_seconds=time.perf_counter()-started, artifacts=artifacts))
             (dest / 'error.json').unlink(missing_ok=True)
             reporting.update_summaries(output)
+            LOG.info('Completed %s', dest.name)
             print(f'Completed: {dest.name}')
         except Exception as exc:
-            atomic_json(dest / 'error.json', {'type': type(exc).__name__, 'message': str(exc)})
+            atomic_json(dest / 'error.json', {'type': type(exc).__name__, 'message': str(exc), 'stage': stage})
+            LOG.exception('Experiment %s failed during %s: %s', run_id, stage, combo)
             failures.append(f'{run_id}: {exc}')
             print(f'Failed: {failures[-1]}', file=sys.stderr)
     reporting.update_summaries(output)
@@ -515,9 +608,10 @@ def main():
     parser.add_argument('--organize-results', metavar='DIRECTORY', help='Organize completed legacy results without retraining')
     parser.add_argument('--plan', action='store_true')
     parser.add_argument('--export-features', action='store_true', help='Export shared features and labels without splitting or training')
+    parser.add_argument('--validate-only', action='store_true', help='Validate selected datasets without generating features or training')
     args = parser.parse_args()
     if args.refresh_summaries:
-        if args.config or args.plan or args.export_features or args.organize_results:
+        if args.config or args.plan or args.export_features or args.validate_only or args.organize_results:
             parser.error('--refresh-summaries must be used alone')
         directory = Path(args.refresh_summaries)
         if not directory.is_dir():
@@ -526,7 +620,7 @@ def main():
         print(f'Refreshed summaries in {directory.resolve()}')
         return
     if args.organize_results:
-        if args.config or args.plan or args.export_features:
+        if args.config or args.plan or args.export_features or args.validate_only:
             parser.error('--organize-results cannot be combined with config or --plan')
         organized, skipped = reporting.organize_existing(args.organize_results, atomic_json, digest)
         for message in organized + skipped:
@@ -534,9 +628,9 @@ def main():
         return
     if not args.config:
         parser.error('a config file is required')
-    if args.plan and args.export_features:
-        parser.error('--plan and --export-features cannot be combined')
-    run(args.config, args.plan, args.export_features)
+    if sum((args.plan, args.export_features, args.validate_only)) > 1:
+        parser.error('--plan, --export-features and --validate-only are mutually exclusive')
+    run(args.config, args.plan, args.export_features, args.validate_only)
 
 
 if __name__ == '__main__':

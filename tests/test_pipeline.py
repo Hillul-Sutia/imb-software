@@ -319,3 +319,40 @@ def test_original_class_metrics_and_evaluation_timer(monkeypatch,positive):
     assert seconds==2.5
     assert np.array_equal(predicted,pred)
     assert values['recall_0']==pytest.approx(2/3)
+
+
+def test_preflight_reports_all_conflicts_before_features(tmp_path, monkeypatch):
+    for name in ('a','b'):
+        pd.DataFrame({'smiles':['CCO','CCN','OCC'],'label':[0,1,1]}).to_csv(tmp_path/f'{name}.csv',index=False)
+    cfg={'datasets':[{'name':name,'path':f'{name}.csv'} for name in ('a','b')]}
+    path=tmp_path/'config.json';path.write_text(json.dumps(cfg))
+    def forbidden(*args,**kwargs):pytest.fail('Preflight failure must prevent feature generation and fitting')
+    monkeypatch.setattr(m,'features',forbidden)
+    monkeypatch.setattr(m,'estimator',forbidden)
+    with pytest.raises(ValueError,match='validation failed for: a, b'):
+        m.run(path)
+    run_dir=next((tmp_path/'results'/'logs').iterdir())
+    report=pd.read_csv(run_dir/'label_conflicts.csv')
+    assert report.dataset.tolist()==['a','a','b','b']
+    assert report.source_data_row.tolist()==[1,3,1,3]
+    assert report.source_excel_row.tolist()==[2,4,2,4]
+    assert report.source_excel_row.equals(report.source_data_row+1)
+    assert report.original_smiles.tolist()==['CCO','OCC']*2
+    assert report.canonical_smiles.tolist()==['CCO']*4
+    assert report.label.tolist()==[0,1]*2
+    assert 'Dataset b failed' in (run_dir/'run.log').read_text()
+    assert not list((tmp_path/'results').glob('*/manifest.json'))
+
+
+def test_validate_only_passes_without_features(tmp_path, monkeypatch):
+    pd.DataFrame({'smiles':['CCO','CCN'],'label':[0,1]}).to_csv(tmp_path/'a.csv',index=False)
+    path=tmp_path/'config.json'
+    path.write_text(json.dumps({'datasets':[{'name':'a','path':'a.csv'}]}))
+    def forbidden(*args,**kwargs):pytest.fail('Validation must not generate features')
+    monkeypatch.setattr(m,'features',forbidden)
+    m.run(path,validate_only=True)
+    run_dir=next((tmp_path/'results'/'logs').iterdir())
+    report=json.loads((run_dir/'validation.json').read_text())
+    assert report['datasets'][0]['retained_rows']==2
+    assert not (run_dir/'label_conflicts.csv').exists()
+    assert 'Run completed' in (run_dir/'run.log').read_text()
