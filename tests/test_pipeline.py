@@ -275,7 +275,7 @@ def test_skip_does_not_hide_class_loss_or_label_conflicts(tmp_path):
         m.load_data({'path':'d.csv','invalid_smiles':'skip'},tmp_path)
     pd.DataFrame({'smiles':['CCO','OCC','invalid'],'label':[0,1,1]}).to_csv(source,index=False)
     with pytest.raises(ValueError,match='Conflicting'):
-        m.load_data({'path':'d.csv','invalid_smiles':'skip'},tmp_path)
+        m.load_data({'path':'d.csv','invalid_smiles':'skip','label_conflicts':'error'},tmp_path)
 
 
 def test_skip_audit_saved_in_experiment(tmp_path):
@@ -324,7 +324,7 @@ def test_original_class_metrics_and_evaluation_timer(monkeypatch,positive):
 def test_preflight_reports_all_conflicts_before_features(tmp_path, monkeypatch):
     for name in ('a','b'):
         pd.DataFrame({'smiles':['CCO','CCN','OCC'],'label':[0,1,1]}).to_csv(tmp_path/f'{name}.csv',index=False)
-    cfg={'datasets':[{'name':name,'path':f'{name}.csv'} for name in ('a','b')]}
+    cfg={'datasets':[{'name':name,'path':f'{name}.csv','label_conflicts':'error'} for name in ('a','b')]}
     path=tmp_path/'config.json';path.write_text(json.dumps(cfg))
     def forbidden(*args,**kwargs):pytest.fail('Preflight failure must prevent feature generation and fitting')
     monkeypatch.setattr(m,'features',forbidden)
@@ -370,7 +370,7 @@ def test_validation_layout_success_and_conflict_outputs(tmp_path):
     pd.DataFrame({'smiles':['CCO','OCC','CCN'],'label':[0,1,1]}).to_csv(bad,index=False)
     before=good.read_bytes()
     cfg={'datasets':[{'name':'good','path':'good.csv','invalid_smiles':'skip'},
-                     {'name':'bad','path':'bad.csv'}]}
+                     {'name':'bad','path':'bad.csv','label_conflicts':'error'}]}
     p=tmp_path/'config.json';p.write_text(json.dumps(cfg))
     with pytest.raises(ValueError,match='failed for: bad'):m.run(p,validate_only=True)
     folder=next((tmp_path/'results'/'validation').iterdir())
@@ -400,3 +400,63 @@ def test_validation_timestamp_collision_and_safe_dataset_names(tmp_path,monkeypa
     assert {d.name for d in root.iterdir()}=={'2026-11-05_10-45-43','2026-11-05_10-45-43_02'}
     assert (root/'2026-11-05_10-45-43'/'a'/'cleaned.csv').exists()
     assert (root/'2026-11-05_10-45-43'/'a_02'/'cleaned.csv').exists()
+
+
+@pytest.mark.parametrize('preferred',[0,1])
+def test_prefer_declared_minority_keeps_one_record_with_audit(tmp_path,preferred):
+    other=1-preferred
+    raw=tmp_path/'d.csv'
+    pd.DataFrame({'smiles':['CCO','OCC','CCO','CCN','CCC'],
+                  'label':[preferred,other,preferred,other,other]}).to_csv(raw,index=False)
+    original=raw.read_bytes()
+    spec={'name':'d','path':'d.csv','minority_label':preferred}
+    data,_=m.load_data(spec,tmp_path)
+    assert raw.read_bytes()==original
+    assert data.loc[data.smiles=='CCO','label'].tolist()==[preferred]
+    assert data.loc[data.smiles=='CCO','source_data_row'].tolist()==[1]
+    assert data.attrs['label_conflicts'].action.tolist()==['retained','excluded_conflicting_label','excluded_duplicate_preferred_label']
+    assert data.attrs['data_quality']['conflicting_rows_excluded']==1
+    cfg={'datasets':[spec]};path=tmp_path/'config.json';path.write_text(json.dumps(cfg))
+    m.run(path,validate_only=True)
+    folder=next((tmp_path/'results'/'validation').iterdir())/'d'
+    assert (folder/'cleaned.csv').exists()
+    assert pd.read_csv(folder/'label_conflicts.csv').label.tolist()==[preferred,other,preferred]
+    assert pd.read_csv(folder/'excluded_rows.csv').label.tolist()==[other]
+
+
+def test_automatic_minority_default_and_invalid_override(tmp_path):
+    pd.DataFrame({'smiles':['CCO','OCC','CCN'],'label':[0,1,1]}).to_csv(tmp_path/'d.csv',index=False)
+    data,_=m.load_data({'path':'d.csv'},tmp_path)
+    assert data.loc[data.smiles=='CCO','label'].tolist()==[0]
+    assert data.attrs['data_quality']['detected_input_minority_label']==0
+    with pytest.raises(m.LabelConflictError):
+        m.load_data({'path':'d.csv','minority_label':True},tmp_path)
+
+
+def test_explicit_error_and_exclude_all_policies(tmp_path):
+    pd.DataFrame({'smiles':['CCO','OCC','CCN','CCC'],'label':[0,1,0,1]}).to_csv(tmp_path/'d.csv',index=False)
+    with pytest.raises(m.LabelConflictError):m.load_data({'path':'d.csv','label_conflicts':'error'},tmp_path)
+    data,_=m.load_data({'path':'d.csv','label_conflicts':'exclude_all'},tmp_path)
+    assert data.smiles.tolist()==['CCN','CCC']
+
+
+
+@pytest.mark.parametrize('minority',[0,1])
+def test_automatic_counts_before_invalid_filtering(tmp_path,minority):
+    other=1-minority
+    # Original counts: minority 2, other 3. After invalid removal the counts tie.
+    pd.DataFrame({'smiles':['CCO','OCC','CCN','CCC','invalid'],
+                  'label':[minority,other,minority,other,other]}).to_csv(tmp_path/'d.csv',index=False)
+    data,_=m.load_data({'path':'d.csv','invalid_smiles':'skip','minority_label':'auto'},tmp_path)
+    assert data.loc[data.smiles=='CCO','label'].tolist()==[minority]
+    quality=data.attrs['data_quality']
+    assert quality['input_class_counts']=={str(other):3,str(minority):2}
+    assert quality['conflict_preferred_label']==minority
+    assert quality['preference_source']=='original_input_class_counts_before_filtering'
+    assert data.attrs['label_conflicts'].preferred_label.tolist()==[minority,minority]
+
+
+def test_automatic_tie_reports_without_guessing(tmp_path):
+    pd.DataFrame({'smiles':['CCO','OCC'],'label':[0,1]}).to_csv(tmp_path/'d.csv',index=False)
+    with pytest.raises(m.LabelConflictError,match='counts are tied'):
+        m.load_data({'path':'d.csv','minority_label':'auto'},tmp_path)

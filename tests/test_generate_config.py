@@ -167,6 +167,8 @@ def test_default_api_and_command_match_requested_settings(tmp_path,monkeypatch):
     assert api['matrix']['feature']==['morgan','chemberta']
     assert api['chemberta']['revision']==g.DEFAULT_CHEMBERTA_REVISION
     assert api['datasets'][0]['target_column']==''
+    assert api['datasets'][0]['label_conflicts']=='prefer_minority'
+    assert api['datasets'][0]['minority_label']=='auto'
     (tmp_path/'config.grid.json').rename(tmp_path/'api.json')
     monkeypatch.setattr('sys.argv',['generate_config'])
     g.main()

@@ -5,7 +5,9 @@
       "path": "data/raw/HIV.csv",
       "smiles_column": "smiles",
       "target_column": "HIV_active",
-      "invalid_smiles": "skip"
+      "invalid_smiles": "skip",
+      "label_conflicts": "prefer_minority",
+      "minority_label": "auto"
     }
   ],
   "seeds": [

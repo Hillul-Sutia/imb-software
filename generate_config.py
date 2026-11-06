@@ -70,7 +70,8 @@ def discover(raw_dir, config_dir, targets=None):
             raise ValueError(f'Duplicate dataset name {name}: use distinct file stems')
         names.add(name)
         datasets.append({'name': name, 'path': Path(os.path.relpath(path, config_dir)).as_posix(),
-                         'smiles_column': smiles, 'target_column': override or '', 'invalid_smiles': 'skip'})
+                         'smiles_column': smiles, 'target_column': override or '', 'invalid_smiles': 'skip',
+                         'label_conflicts': 'prefer_minority', 'minority_label': 'auto'})
         if override is None:
             notices.append(f'{relative}: target_column is blank; choose the intended binary label column.')
     if set(targets) - used:

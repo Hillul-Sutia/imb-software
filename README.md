@@ -362,3 +362,18 @@ uv run python -m molpipeline config.grid.json
 Python pathlib resolves `.cache/features` and `.cache/runtime` relative to the config file. Model downloads, Torch/compiler caches and temporary training files are routed beneath the runtime cache; paths are recorded in each validation run's cache_locations.json. The context restores process environment settings on exit. `MOLPIPELINE_RUNTIME_CACHE` and `MOLPIPELINE_FEATURE_CACHE` remain optional environment overrides. uv package caching defaults to `.cache/uv` via pyproject.toml.
 
 Put the project/config on the drive where you want its caches stored. Existing C-drive caches are not deleted or migrated. Python runtime settings cannot redirect uv-managed Python downloads, operating-system files or bytecode produced before the program starts; those remain subject to the external tool/system settings. The former project.ps1 launcher has been removed.
+
+## Conflict resolution policy (default: automatically prefer input minority)
+
+Generated dataset entries now include:
+
+```json
+"label_conflicts": "prefer_minority",
+"minority_label": "auto"
+```
+
+Missing or null minority_label also means auto for backward compatibility. The original input CSV's target counts, before invalid-SMILES removal, deduplication or conflict resolution, determine whether 0 or 1 is the minority. No label value is hardcoded. For each conflicting canonical molecule, the first source record with that minority label is retained; opposite-label records are excluded and additional matching-label duplicates collapse to one molecule. Tied input counts with conflicts fail explicitly because no automatic minority exists. An explicit minority_label=0/1 remains a manual override; prefer_label with preferred_label=0/1, error and exclude_all are available alternatives.
+
+Each resolved conflict report records original and processed SMILES, source row numbers, label, retained/excluded action, policy, selected label, preference source and both original input class counts. data_quality.json and validation details record the chosen label, counts before/after cleaning, exclusions and dataset-level cleaning scope. Original CSVs remain unchanged. cleaned.csv contains the actual retained rows and original labels; both classes must remain after preparation.
+
+Automatic preference is a WHOLE-DATASET cleaning assumption: it uses labels from records that later enter the test set and favors the minority label for ambiguous molecules. This departs from strict leakage-free label adjudication and can change evaluation results. It is not evidence that the retained label is scientifically correct. Report this policy when interpreting benchmark results; use error/exclude_all or an external fixed preference for stricter adjudication. Hyperparameter search, threshold fitting and metric positive-label selection still use only training partitions.
