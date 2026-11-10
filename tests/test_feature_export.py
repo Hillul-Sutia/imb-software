@@ -2,7 +2,7 @@ import json
 import numpy as np
 import pandas as pd
 import pytest
-import molpipeline as m
+from molpipeline import pipeline as m
 
 
 @pytest.mark.parametrize('kind',['morgan','chemberta'])

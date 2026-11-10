@@ -22,11 +22,15 @@ dependencies = [
 test = ["pytest>=8"]
 
 [project.scripts]
-mol-experiment = "molpipeline:main"
+mol-experiment = "molpipeline.cli:main"
 mol-config = "generate_config:main"
 
 [tool.setuptools]
-py-modules = ["molpipeline", "generate_config", "result_reporting", "runtime_cache"]
+package-dir = {"" = "src"}
+py-modules = ["generate_config"]
+
+[tool.setuptools.packages.find]
+where = ["src"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

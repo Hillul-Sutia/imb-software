@@ -5,7 +5,8 @@ import pandas as pd
 import pytest
 from sklearn.ensemble import RandomForestClassifier
 from sklearn.model_selection import GridSearchCV
-import molpipeline as m
+from molpipeline import config, data as dataset, training, pipeline as m
+from functools import partial
 
 
 def molecules():
@@ -17,16 +18,16 @@ def molecules():
 def test_schema_duplicates_and_conflicts(tmp_path):
     p=tmp_path/'d.csv'
     pd.DataFrame({'smiles':['CCO','OCC','CCN'], 'label':[0,0,1]}).to_csv(p,index=False)
-    d,_=m.load_data({'path':'d.csv'},tmp_path)
+    d,_=dataset.load_data({'path':'d.csv'},tmp_path)
     assert len(d)==2
     pd.DataFrame({'smiles':['CCO','OCC'], 'label':[0,1]}).to_csv(p,index=False)
-    with pytest.raises(ValueError,match='Conflicting'):m.load_data({'path':'d.csv'},tmp_path)
+    with pytest.raises(ValueError,match='Conflicting'):dataset.load_data({'path':'d.csv'},tmp_path)
 
 
 @pytest.mark.parametrize('split',['random','scaffold'])
 def test_split_and_inner_cv_no_leakage(tmp_path,split):
     molecules().to_csv(tmp_path/'d.csv',index=False)
-    d,_=m.load_data({'path':'d.csv'},tmp_path)
+    d,_=dataset.load_data({'path':'d.csv'},tmp_path)
     tr,te=m.partition(d,split,.25,42)
     g=d.scaffold.to_numpy() if split=='scaffold' else d.smiles.to_numpy()
     assert not set(g[tr]) & set(g[te])
@@ -39,12 +40,12 @@ def test_split_and_inner_cv_no_leakage(tmp_path,split):
 def test_mtune_real_package_threshold_and_grid():
     rng=np.random.RandomState(3)
     x=rng.normal(size=(90,6));y=np.array([0]*60+[1]*30)
-    model=m.MTuneAdapter(RandomForestClassifier(n_estimators=5,random_state=7),method='direct').fit(x,y)
+    model=training.MTuneAdapter(RandomForestClassifier(n_estimators=5,random_state=7),method='direct').fit(x,y)
     actual=model.estimator_
     idx=list(actual.models_[0].classes_).index(actual.minority_class)
     expected=actual.models_[0].predict_proba(pd.DataFrame(x))[:,idx].mean()
     assert actual.threshold==pytest.approx(expected)
-    search=GridSearchCV(m.MTuneAdapter(RandomForestClassifier(random_state=7)),
+    search=GridSearchCV(training.MTuneAdapter(RandomForestClassifier(random_state=7)),
         {'base_model__n_estimators':[5,10]},scoring='balanced_accuracy',cv=3,error_score='raise')
     search.fit(x,y)
     assert len(search.predict(x))==90
@@ -54,7 +55,7 @@ def test_mtune_real_package_threshold_and_grid():
 
 def test_mtune_ensemble_minority_zero():
     x=np.random.RandomState(1).normal(size=(60,4));y=np.array([0]*20+[1]*40)
-    model=m.MTuneAdapter(RandomForestClassifier(n_estimators=5,random_state=3),method='ensemble',n_ensemble=3).fit(x,y)
+    model=training.MTuneAdapter(RandomForestClassifier(n_estimators=5,random_state=3),method='ensemble',n_ensemble=3).fit(x,y)
     assert model.estimator_.minority_class==0
     assert len(model.estimator_.thresholds_)==3
     assert set(model.predict(x)) <= {0,1}
@@ -62,11 +63,11 @@ def test_mtune_ensemble_minority_zero():
 
 def test_cartesian_and_selection():
     cfg={'datasets':[{'name':str(i)} for i in range(4)]}
-    assert len(m.combinations(cfg))==64
+    assert len(config.combinations(cfg))==64
     cfg['matrix']={'optimization':['default','grid']}
-    assert len(m.combinations(cfg))==128
+    assert len(config.combinations(cfg))==128
     cfg['matrix'].update(feature=['morgan'],model=['random_forest'])
-    assert len(m.combinations(cfg))==32
+    assert len(config.combinations(cfg))==32
 
 
 def test_end_to_end_resume_and_invalidation(tmp_path):
@@ -103,9 +104,9 @@ def test_catboost_and_mtune_grid():
     rng=np.random.RandomState(4)
     x=rng.normal(size=(60,5));y=np.array([0]*40+[1]*20)
     combo={'model':'catboost','seed':4,'strategy':'mtune'}
-    model=m.estimator(combo,{'model_params':{'catboost':{'iterations':3,'depth':2}},'mtune':{'method':'ensemble','n_ensemble':3}})
+    model=training.estimator(combo,{'model_params':{'catboost':{'iterations':3,'depth':2}},'mtune':{'method':'ensemble','n_ensemble':3}})
     search=GridSearchCV(model,{'base_model__depth':[2,3]},cv=2,
-        scoring=m.partial(m.cv_metrics,positive=1),refit='average_precision',error_score='raise')
+        scoring=partial(training.cv_metrics,positive=1),refit='average_precision',error_score='raise')
     search.fit(x,y)
     assert search.predict_proba(x).shape==(60,2)
 
@@ -127,15 +128,15 @@ def test_minority_mapping_continuous_scores(positive):
     y=np.where(y_binary,positive,1-positive)
     pred=np.where(pred_binary,positive,1-positive)
     prob=np.array([.9,.8,.3,.2,.7,.1])
-    assert m.positive_label(y)==positive
-    actual=m.minority_metrics(y,pred,prob,positive)
+    assert training.positive_label(y)==positive
+    actual=training.minority_metrics(y,pred,prob,positive)
     assert actual['recall']==pytest.approx(.5)
     assert actual['specificity']==pytest.approx(.75)
     assert actual['precision']==pytest.approx(.5)
     assert actual['f2']==pytest.approx(.5)
     assert actual['average_precision']==pytest.approx(5/6)
     assert actual['roc_auc']==pytest.approx(7/8)
-    assert actual['average_precision'] != m.metrics(y_binary,pred_binary,pred_binary)['average_precision']
+    assert actual['average_precision'] != training.metrics(y_binary,pred_binary,pred_binary)['average_precision']
 
 
 @pytest.mark.parametrize('objective',['average_precision','balanced_accuracy','f2'])
@@ -168,18 +169,18 @@ def test_multimetric_training_only_grid(tmp_path,monkeypatch,objective,strategy)
     result=json.loads(result_path.read_text());dest=result_path.parent
     split=json.loads((dest/'split.json').read_text())
     cv=json.loads((dest/'cv.json').read_text())
-    training=set(split['train']);test=set(split['test'])
-    assert seen and all(rows <= training and not rows & test for rows in seen)
+    training_rows=set(split['train']);test=set(split['test'])
+    assert seen and all(rows <= training_rows and not rows & test for rows in seen)
     if strategy == 'mtune_ensemble':
         selected=result['best_params']['n_ensemble']
-        assert set.union(*seen[-selected:])==training
+        assert set.union(*seen[-selected:])==training_rows
     else:
-        assert seen[-1]==training
+        assert seen[-1]==training_rows
     for pair in cv:
-        assert set(pair['train'])|set(pair['validation'])==training
+        assert set(pair['train'])|set(pair['validation'])==training_rows
         assert not set(data.scaffold.iloc[pair['train']]) & set(data.scaffold.iloc[pair['validation']])
     scores=pd.read_csv(dest/'cv_results.csv')
-    for name in m.CV_METRICS:
+    for name in training.CV_METRICS:
         assert f'mean_test_{name}' in scores
         assert f'std_test_{name}' in scores
         assert f'split0_test_{name}' in scores
@@ -213,19 +214,19 @@ def test_multimetric_training_only_grid(tmp_path,monkeypatch,objective,strategy)
     assert result['label_mapping']['positive_original_label']==0
     prediction=pd.read_csv(dest/'predictions.csv')
     assert np.allclose(prediction.p_minority,1-prediction.p_class_1)
-    expected=m.minority_metrics(prediction.y_true,prediction.y_pred,prediction.p_minority,0)
-    for name in m.CV_METRICS:
+    expected=training.minority_metrics(prediction.y_true,prediction.y_pred,prediction.p_minority,0)
+    for name in training.CV_METRICS:
         assert result['metrics'][name]==pytest.approx(expected[name])
     before=result_path.stat().st_mtime_ns;m.run(p)
     assert result_path.stat().st_mtime_ns==before
 
 
 def test_refit_configuration():
-    assert m.refit_objective({})=='average_precision'
-    assert m.refit_objective({'scoring':'balanced_accuracy'})=='balanced_accuracy'
-    assert m.refit_objective({'refit_metric':'f2','scoring':'balanced_accuracy'})=='f2'
-    with pytest.raises(ValueError,match='refit_metric'):m.refit_objective({'refit_metric':'accuracy'})
-    assert m.positive_label(np.array([0,1]))==1
+    assert config.refit_objective({})=='average_precision'
+    assert config.refit_objective({'scoring':'balanced_accuracy'})=='balanced_accuracy'
+    assert config.refit_objective({'refit_metric':'f2','scoring':'balanced_accuracy'})=='f2'
+    with pytest.raises(ValueError,match='refit_metric'):config.refit_objective({'refit_metric':'accuracy'})
+    assert training.positive_label(np.array([0,1]))==1
 
 
 
@@ -235,16 +236,16 @@ def test_ensemble_grid_validation():
     combo={'strategy':'mtune','model':'random_forest'}
     cfg={'grids':{'random_forest':{'max_depth':[2]}},
          'mtune':{'method':'ensemble'},'mtune_grid':{'n_ensemble':[1,3]}}
-    assert m.parameter_grid(combo,cfg,y,cv)=={'base_model__max_depth':[2],'n_ensemble':[1,3]}
+    assert training.parameter_grid(combo,cfg,y,cv)=={'base_model__max_depth':[2],'n_ensemble':[1,3]}
     for invalid in ([],[0],[True],[2.5],[100]):
         cfg['mtune_grid']['n_ensemble']=invalid
-        with pytest.raises(ValueError):m.parameter_grid(combo,cfg,y,cv)
+        with pytest.raises(ValueError):training.parameter_grid(combo,cfg,y,cv)
     cfg['mtune_grid']={'n_ensemble':[1,3]};cfg['mtune']['method']='direct'
-    with pytest.raises(ValueError,match='direct mode'):m.parameter_grid(combo,cfg,y,cv)
+    with pytest.raises(ValueError,match='direct mode'):training.parameter_grid(combo,cfg,y,cv)
     cfg.pop('mtune_grid')
-    assert m.parameter_grid(combo,cfg,y,cv)=={'base_model__max_depth':[2]}
+    assert training.parameter_grid(combo,cfg,y,cv)=={'base_model__max_depth':[2]}
     combo['strategy']='default'
-    assert m.parameter_grid(combo,cfg,y,cv)=={'max_depth':[2]}
+    assert training.parameter_grid(combo,cfg,y,cv)=={'max_depth':[2]}
 
 
 def test_invalid_smiles_strict_and_audited_skip(tmp_path):
@@ -253,8 +254,8 @@ def test_invalid_smiles_strict_and_audited_skip(tmp_path):
     pd.DataFrame({'smiles':['CCO',bad,'CCN','OCC'],'label':[0,1,1,0]}).to_csv(source,index=False)
     before=source.read_bytes()
     spec={'path':'d.csv'}
-    with pytest.raises(ValueError,match='CSV data row 2'):m.load_data(spec,tmp_path)
-    data,_=m.load_data({**spec,'invalid_smiles':'skip'},tmp_path)
+    with pytest.raises(ValueError,match='CSV data row 2'):dataset.load_data(spec,tmp_path)
+    data,_=dataset.load_data({**spec,'invalid_smiles':'skip'},tmp_path)
     assert source.read_bytes()==before
     assert len(data)==2
     assert data.source_data_row.tolist()==[1,3]
@@ -265,17 +266,17 @@ def test_invalid_smiles_strict_and_audited_skip(tmp_path):
     assert quality['duplicate_rows_removed']==1
     assert quality['retained_class_counts']=={'0':1,'1':1}
     with pytest.raises(ValueError,match='invalid_smiles must'):
-        m.load_data({**spec,'invalid_smiles':'unknown'},tmp_path)
+        dataset.load_data({**spec,'invalid_smiles':'unknown'},tmp_path)
 
 
 def test_skip_does_not_hide_class_loss_or_label_conflicts(tmp_path):
     source=tmp_path/'d.csv'
     pd.DataFrame({'smiles':['CCO','invalid'],'label':[0,1]}).to_csv(source,index=False)
     with pytest.raises(ValueError,match='Both binary classes'):
-        m.load_data({'path':'d.csv','invalid_smiles':'skip'},tmp_path)
+        dataset.load_data({'path':'d.csv','invalid_smiles':'skip'},tmp_path)
     pd.DataFrame({'smiles':['CCO','OCC','invalid'],'label':[0,1,1]}).to_csv(source,index=False)
     with pytest.raises(ValueError,match='Conflicting'):
-        m.load_data({'path':'d.csv','invalid_smiles':'skip','label_conflicts':'error'},tmp_path)
+        dataset.load_data({'path':'d.csv','invalid_smiles':'skip','label_conflicts':'error'},tmp_path)
 
 
 def test_skip_audit_saved_in_experiment(tmp_path):
@@ -305,17 +306,17 @@ def test_original_class_metrics_and_evaluation_timer(monkeypatch,positive):
     pred=np.array([0,1,0,1,1,0])
     p1=np.array([.1,.8,.3,.9,.7,.2])
     minority_prob=p1 if positive==1 else 1-p1
-    actual=m.minority_metrics(y,pred,minority_prob,positive)
+    actual=training.minority_metrics(y,pred,minority_prob,positive)
     for label in (0,1):
-        expected=m.metrics((y==label).astype(int),(pred==label).astype(int),p1 if label==1 else 1-p1)
-        for name in m.CLASS_METRICS:
+        expected=training.metrics((y==label).astype(int),(pred==label).astype(int),p1 if label==1 else 1-p1)
+        for name in training.CLASS_METRICS:
             assert actual[f'{name}_{label}']==pytest.approx(expected[name])
     class FixedModel:
         classes_=np.array([1,0])  # Explicitly test probability-column alignment.
         def predict_proba(self,X):return np.column_stack([p1,1-p1])
     ticks=iter([10.,12.5])
-    monkeypatch.setattr(m,'time',SimpleNamespace(perf_counter=lambda:next(ticks)))
-    values,predicted,_,_,seconds=m.evaluate_partition(FixedModel(),np.zeros((6,1)),y,positive)
+    monkeypatch.setattr(training,'time',SimpleNamespace(perf_counter=lambda:next(ticks)))
+    values,predicted,_,_,seconds=training.evaluate_partition(FixedModel(),np.zeros((6,1)),y,positive)
     assert seconds==2.5
     assert np.array_equal(predicted,pred)
     assert values['recall_0']==pytest.approx(2/3)
@@ -410,7 +411,7 @@ def test_prefer_declared_minority_keeps_one_record_with_audit(tmp_path,preferred
                   'label':[preferred,other,preferred,other,other]}).to_csv(raw,index=False)
     original=raw.read_bytes()
     spec={'name':'d','path':'d.csv','minority_label':preferred}
-    data,_=m.load_data(spec,tmp_path)
+    data,_=dataset.load_data(spec,tmp_path)
     assert raw.read_bytes()==original
     assert data.loc[data.smiles=='CCO','label'].tolist()==[preferred]
     assert data.loc[data.smiles=='CCO','source_data_row'].tolist()==[1]
@@ -426,17 +427,17 @@ def test_prefer_declared_minority_keeps_one_record_with_audit(tmp_path,preferred
 
 def test_automatic_minority_default_and_invalid_override(tmp_path):
     pd.DataFrame({'smiles':['CCO','OCC','CCN'],'label':[0,1,1]}).to_csv(tmp_path/'d.csv',index=False)
-    data,_=m.load_data({'path':'d.csv'},tmp_path)
+    data,_=dataset.load_data({'path':'d.csv'},tmp_path)
     assert data.loc[data.smiles=='CCO','label'].tolist()==[0]
     assert data.attrs['data_quality']['detected_input_minority_label']==0
-    with pytest.raises(m.LabelConflictError):
-        m.load_data({'path':'d.csv','minority_label':True},tmp_path)
+    with pytest.raises(dataset.LabelConflictError):
+        dataset.load_data({'path':'d.csv','minority_label':True},tmp_path)
 
 
 def test_explicit_error_and_exclude_all_policies(tmp_path):
     pd.DataFrame({'smiles':['CCO','OCC','CCN','CCC'],'label':[0,1,0,1]}).to_csv(tmp_path/'d.csv',index=False)
-    with pytest.raises(m.LabelConflictError):m.load_data({'path':'d.csv','label_conflicts':'error'},tmp_path)
-    data,_=m.load_data({'path':'d.csv','label_conflicts':'exclude_all'},tmp_path)
+    with pytest.raises(dataset.LabelConflictError):dataset.load_data({'path':'d.csv','label_conflicts':'error'},tmp_path)
+    data,_=dataset.load_data({'path':'d.csv','label_conflicts':'exclude_all'},tmp_path)
     assert data.smiles.tolist()==['CCN','CCC']
 
 
@@ -447,7 +448,7 @@ def test_automatic_counts_before_invalid_filtering(tmp_path,minority):
     # Original counts: minority 2, other 3. After invalid removal the counts tie.
     pd.DataFrame({'smiles':['CCO','OCC','CCN','CCC','invalid'],
                   'label':[minority,other,minority,other,other]}).to_csv(tmp_path/'d.csv',index=False)
-    data,_=m.load_data({'path':'d.csv','invalid_smiles':'skip','minority_label':'auto'},tmp_path)
+    data,_=dataset.load_data({'path':'d.csv','invalid_smiles':'skip','minority_label':'auto'},tmp_path)
     assert data.loc[data.smiles=='CCO','label'].tolist()==[minority]
     quality=data.attrs['data_quality']
     assert quality['input_class_counts']=={str(other):3,str(minority):2}
@@ -458,5 +459,5 @@ def test_automatic_counts_before_invalid_filtering(tmp_path,minority):
 
 def test_automatic_tie_reports_without_guessing(tmp_path):
     pd.DataFrame({'smiles':['CCO','OCC'],'label':[0,1]}).to_csv(tmp_path/'d.csv',index=False)
-    with pytest.raises(m.LabelConflictError,match='counts are tied'):
-        m.load_data({'path':'d.csv','minority_label':'auto'},tmp_path)
+    with pytest.raises(dataset.LabelConflictError,match='counts are tied'):
+        dataset.load_data({'path':'d.csv','minority_label':'auto'},tmp_path)

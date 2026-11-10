@@ -2,7 +2,7 @@ import json
 import pandas as pd
 import pytest
 import generate_config as g
-import molpipeline as m
+from molpipeline import config, pipeline as m
 
 
 def csv(path,columns):
@@ -18,7 +18,7 @@ def test_known_files_headers_paths_and_nonoverwrite(tmp_path):
     csv(raw/'clintox.csv.gz',{'smiles':['CC'],'CT_TOX':[1],'FDA_APPROVED':[0]})
     output=tmp_path/'configs'/'matrix.json'
     cfg,_,count=g.generate(raw,output)
-    assert count==32==len(m.combinations(cfg))
+    assert count==64==len(config.combinations(cfg))
     assert all(d['target_column']=='' for d in cfg['datasets'])
     assert all(d['invalid_smiles']=='skip' for d in cfg['datasets'])
     assert all((output.parent/d['path']).exists() for d in cfg['datasets'])
@@ -32,7 +32,7 @@ def test_multitarget_requires_selection(tmp_path):
     csv(tmp_path/'muv.csv.gz',{'smiles':['CC'],'MUV-466':[1],'MUV-548':[0]})
     csv(tmp_path/'BBBP.csv',{'smiles':['CC'],'p_np':[0]})
     cfg,notices,count=g.generate(tmp_path,tmp_path/'config.json')
-    assert count==16 and len(cfg['datasets'])==2
+    assert count==32 and len(cfg['datasets'])==2
     assert all(d['target_column']=='' for d in cfg['datasets'])
     assert all(d['invalid_smiles']=='skip' for d in cfg['datasets'])
     cfg,_,count=g.generate(tmp_path,tmp_path/'selected.json',targets={'muv.csv.gz':'MUV-548'},preset='smoke')
@@ -46,7 +46,7 @@ def test_chemberta_revision_and_objective(tmp_path):
         g.generate(tmp_path,tmp_path/'invalid.json',chemberta_revision='main')
     assert not (tmp_path/'invalid.json').exists()
     cfg,_,count=g.generate(tmp_path,tmp_path/'full.json',chemberta_revision='a'*40,refit_metric='f2')
-    assert count==8==len(m.combinations(cfg))
+    assert count==16==len(config.combinations(cfg))
     assert cfg['chemberta']['revision']=='a'*40 and cfg['refit_metric']=='f2'
 
 
@@ -90,7 +90,7 @@ def test_generate_ensemble_grid(tmp_path):
     cfg,_,count=g.generate(tmp_path,tmp_path/'ensemble.json',mtune_method='ensemble')
     assert cfg['mtune']['method']=='ensemble'
     assert cfg['mtune_grid']=={'n_ensemble':[3,5,7,9,11]}
-    assert count==8
+    assert count==16
 
 
 
@@ -133,7 +133,7 @@ def test_full_scan_not_just_first_chunk(tmp_path):
 
 
 
-@pytest.mark.parametrize('mode,expected,count',[('grid',['grid'],8),('default',['default'],8),('both',['default','grid'],16)])
+@pytest.mark.parametrize('mode,expected,count',[('grid',['grid'],16),('default',['default'],16),('both',['default','grid'],32)])
 def test_optimization_selection(tmp_path,mode,expected,count):
     csv(tmp_path/'custom.csv',{'structure':['CC'],'label':[0]})
     cfg,_,actual=g.generate(tmp_path,tmp_path/'selected.json',optimization=mode,
@@ -148,6 +148,7 @@ def test_explicit_optimization_overrides_preset(tmp_path):
     csv(tmp_path/'custom.csv',{'structure':['CC'],'label':[0]})
     cfg,_,count=g.generate(tmp_path,tmp_path/'grid.json',preset='smoke',optimization='grid')
     assert cfg['matrix']['optimization']==['grid'] and count==2
+    assert cfg['matrix']['split']==['random']
     with pytest.raises(ValueError,match='optimization'):
         g.generate(tmp_path,tmp_path/'invalid.json',optimization='unknown')
 
@@ -158,12 +159,12 @@ def test_default_api_and_command_match_requested_settings(tmp_path,monkeypatch):
     csv(tmp_path/'data'/'raw'/'arbitrary.csv',{'structure':['CC'],'label':[0]})
     api,_,count=g.generate()
     assert (tmp_path/'config.grid.json').exists()
-    assert count==8
+    assert count==16
     assert api['mtune']=={'method':'ensemble'}
     assert api['mtune_grid']['n_ensemble']==[3,5,7,9,11]
     assert api['refit_metric']=='balanced_accuracy'
     assert api['matrix']['optimization']==['grid']
-    assert api['matrix']['split']==['random']
+    assert api['matrix']['split']==['random','scaffold']
     assert api['matrix']['feature']==['morgan','chemberta']
     assert api['chemberta']['revision']==g.DEFAULT_CHEMBERTA_REVISION
     assert api['datasets'][0]['target_column']==''
@@ -174,7 +175,7 @@ def test_default_api_and_command_match_requested_settings(tmp_path,monkeypatch):
     g.main()
     cli=json.loads((tmp_path/'config.grid.json').read_text())
     assert cli==api
-    assert cli['matrix']['split']==['random']
+    assert cli['matrix']['split']==['random','scaffold']
     assert all(d['invalid_smiles']=='skip' for d in cli['datasets'])
     # Existing output is protected even with no arguments.
     with pytest.raises(SystemExit) as error:g.main()
@@ -189,6 +190,6 @@ def test_explicit_old_modes_remain_available(tmp_path):
     assert cfg['mtune']=={'method':'direct'}
     assert 'mtune_grid' not in cfg
     assert cfg['refit_metric']=='average_precision'
-    assert count==16
+    assert count==32
     cfg,_,_=g.generate(tmp_path,tmp_path/'fixed.json',optimization='default')
     assert cfg['mtune']['n_ensemble']==11

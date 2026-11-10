@@ -3,7 +3,7 @@ from pathlib import Path
 import sys
 import tempfile
 import pytest
-from runtime_cache import cache_environment
+from molpipeline.cache import cache_environment
 
 
 def test_runtime_routes_override_old_locations_and_restore(tmp_path,monkeypatch):

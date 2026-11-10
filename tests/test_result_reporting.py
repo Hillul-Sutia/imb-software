@@ -2,8 +2,8 @@ import json
 import numpy as np
 import pandas as pd
 import pytest
-import molpipeline as m
-import result_reporting as r
+from molpipeline import pipeline as m
+from molpipeline import cli, reporting as r
 
 
 def test_focused_metadata_and_safe_names():
@@ -80,7 +80,7 @@ def test_refresh_summaries_does_not_modify_experiment(tmp_path,monkeypatch):
                                     'metrics':{'accuracy':.8},'elapsed_seconds':60.})
     before=(dest/'result.json').read_bytes()
     monkeypatch.setattr('sys.argv',['molpipeline','--refresh-summaries',str(tmp_path)])
-    m.main()
+    cli.main()
     assert (dest/'result.json').read_bytes()==before
     table=pd.read_csv(tmp_path/'performance_summary.csv')
     assert table.elapsed_seconds.iloc[0]==60.
