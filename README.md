@@ -4,19 +4,21 @@ A reproducible batch pipeline for comparing molecular classifiers on imbalanced 
 
 ## Quick start
 
-Run these commands from the project root on Windows or Linux:
+Run these commands from the project root on Windows or Linux. The checked-in `.python-version` selects Python 3.12, so no `--python` flag is needed:
 
 ```shell
-uv sync --locked --python 3.12
-uv run --locked python -m generate_config
+uv sync
+uv run python -m generate_config
 ```
+
+Keep `uv.lock` in Git. Ordinary `uv sync` uses the lockfile when it is current and can update it when project requirements change. Use `uv sync --locked` in CI if a stale lockfile should fail the build.
 
 Place your `.csv` or `.csv.gz` datasets directly in `data/raw/` before generating the config. Subfolders are ignored. Review the detected SMILES columns and fill in each blank `target_column` in `config.grid.json`. Targets must contain both original labels `0` and `1`. The generator never overwrites an existing config; use `--output config.new.json` to generate another.
 
 ```shell
-uv run --locked python -m molpipeline config.grid.json --plan
-uv run --locked python -m molpipeline config.grid.json --validate-only
-uv run --locked python -m molpipeline config.grid.json
+uv run python -m molpipeline config.grid.json --plan
+uv run python -m molpipeline config.grid.json --validate-only
+uv run python -m molpipeline config.grid.json
 ```
 
 - **Plan:** list experiments without loading datasets or fitting models.
@@ -75,7 +77,7 @@ Metric suffixes `_0` and `_1` refer to the original labels. Minority-oriented me
 Refresh summaries from saved results without training:
 
 ```shell
-uv run --locked python -m molpipeline --refresh-summaries results
+uv run python -m molpipeline --refresh-summaries results
 ```
 
 If the CSV is open and locked, the refresh writes a `.updated.csv` copy. Older unrecorded timings remain blank.
@@ -106,8 +108,8 @@ The installed commands `mol-experiment` and `mol-config` are also available thro
 ## Tests
 
 ```shell
-uv sync --locked --extra test --python 3.12
-uv run --locked --extra test python -m pytest tests -q
+uv sync --extra test
+uv run --extra test python -m pytest tests -q
 ```
 
 Tests cover cleaning and audit reports, split isolation, class-label orientation, training-only tuning, M-Tune integration, feature reuse, timing, and resume. The automated suite uses small fixtures and does not require a ChemBERTa weight download.
